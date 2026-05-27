@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useCallback, useMemo, useState } from "react";
+import { useRef, useCallback, useMemo, useState, useEffect } from "react";
 import {
   Excalidraw,
   exportToBlob,
@@ -26,6 +26,13 @@ interface ShapeConfig {
   height: number;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   skeleton: Record<string, any>;
+}
+
+interface SavedCanvas {
+  id: string;
+  name: string;
+  updatedAt: number;
+  data: string;
 }
 
 // ─── Shape palette ────────────────────────────────────────────────────────────
@@ -325,17 +332,70 @@ const TEMPLATES: Array<{ id: string; label: string; elements: any[] }> = [
   },
 ];
 
-// ─── Persistence ──────────────────────────────────────────────────────────────
+// ─── Multi-canvas storage ─────────────────────────────────────────────────────
 
-const LS_KEY = "arch-design-canvas-v1";
+const LS_CANVASES_KEY = "arch-design-canvases-v1";
+const LS_DRAFT_KEY = "arch-design-draft-v1";
+const MAX_CANVASES = 20;
 
-function loadFromStorage() {
+function listCanvases(): SavedCanvas[] {
   try {
-    const raw = localStorage.getItem(LS_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
+    const raw = localStorage.getItem(LS_CANVASES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function persistCanvases(list: SavedCanvas[]): void {
+  try {
+    localStorage.setItem(LS_CANVASES_KEY, JSON.stringify(list));
+  } catch {}
+}
+
+function saveCanvas(id: string | null, name: string, data: string): SavedCanvas[] {
+  const list = listCanvases();
+  const now = Date.now();
+  const newId = id ?? crypto.randomUUID();
+  const idx = list.findIndex((c) => c.id === newId);
+  if (idx >= 0) {
+    list[idx] = { ...list[idx], name, updatedAt: now, data };
+  } else {
+    list.unshift({ id: newId, name, updatedAt: now, data });
   }
+  const sorted = list.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_CANVASES);
+  persistCanvases(sorted);
+  return sorted;
+}
+
+function deleteCanvas(id: string): SavedCanvas[] {
+  const list = listCanvases().filter((c) => c.id !== id);
+  persistCanvases(list);
+  return list;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function loadDraft(): any {
+  try {
+    const draft = localStorage.getItem(LS_DRAFT_KEY);
+    if (draft) return JSON.parse(draft);
+    // Migrate from the previous single-canvas key
+    const legacy = localStorage.getItem("arch-design-canvas-v1");
+    if (legacy) {
+      localStorage.setItem(LS_DRAFT_KEY, legacy);
+      localStorage.removeItem("arch-design-canvas-v1");
+      return JSON.parse(legacy);
+    }
+    return null;
+  } catch { return null; }
+}
+
+function formatAge(ts: number): string {
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -343,11 +403,19 @@ function loadFromStorage() {
 export default function CanvasClient() {
   const apiRef = useRef<API>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [activeTemplate, setActiveTemplate] = useState<string | null>(null);
+  const [sidebarTab, setSidebarTab] = useState<"shapes" | "saved">("shapes");
+  const [savedCanvases, setSavedCanvases] = useState<SavedCanvas[]>(() => listCanvases());
+  const [activeCanvasId, setActiveCanvasId] = useState<string | null>(null);
 
-  const initialData = useMemo(() => loadFromStorage(), []);
+  // Save-name inline input state
+  const [showSaveInput, setShowSaveInput] = useState(false);
+  const [saveName, setSaveName] = useState("");
 
-  // Auto-save to localStorage on every change (debounced 400ms)
+  const initialData = useMemo(() => loadDraft(), []);
+
+  // Auto-save draft to localStorage on every change (debounced 400ms)
   const handleChange = useCallback(
     (elements: readonly unknown[], appState: unknown) => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -359,7 +427,7 @@ export default function CanvasClient() {
             {},
             "local"
           );
-          localStorage.setItem(LS_KEY, json);
+          localStorage.setItem(LS_DRAFT_KEY, json);
         } catch {}
       }, 400);
     },
@@ -393,17 +461,95 @@ export default function CanvasClient() {
     api.updateScene({ elements: els });
     setTimeout(() => api.scrollToContent(els, { animate: true, fitToContent: true }), 50);
     setActiveTemplate(templateId);
+    setActiveCanvasId(null);
   }, []);
+
+  // Load a named saved canvas
+  const loadSavedCanvas = useCallback((canvas: SavedCanvas) => {
+    const api = apiRef.current;
+    if (!api) return;
+    try {
+      const parsed = JSON.parse(canvas.data);
+      api.updateScene({ elements: parsed.elements ?? [] });
+      setActiveCanvasId(canvas.id);
+      setActiveTemplate(null);
+    } catch {}
+  }, []);
+
+  // Core save — shared between the input form and the keyboard shortcut
+  const doSave = useCallback((id: string | null, name: string) => {
+    const api = apiRef.current;
+    if (!api || !name) return;
+    const data = serializeAsJSON(
+      api.getSceneElements() as Parameters<typeof serializeAsJSON>[0],
+      api.getAppState() as Parameters<typeof serializeAsJSON>[1],
+      {},
+      "local"
+    );
+    const updated = saveCanvas(id, name, data);
+    setSavedCanvases(updated);
+    if (!id) setActiveCanvasId(updated[0].id);
+  }, []);
+
+  const commitSave = useCallback(() => {
+    const trimmed = saveName.trim();
+    if (!trimmed) return;
+    doSave(activeCanvasId, trimmed);
+    setShowSaveInput(false);
+    setSaveName("");
+  }, [activeCanvasId, doSave, saveName]);
+
+  const cancelSave = useCallback(() => {
+    setShowSaveInput(false);
+    setSaveName("");
+  }, []);
+
+  // Save button — silent update if already named, prompt only for new canvases
+  const handleSaveClick = useCallback(() => {
+    if (activeCanvasId) {
+      const current = savedCanvases.find((c) => c.id === activeCanvasId);
+      if (current) { doSave(activeCanvasId, current.name); return; }
+    }
+    setSaveName("");
+    setShowSaveInput(true);
+  }, [activeCanvasId, doSave, savedCanvases]);
+
+  // Cmd+S / Ctrl+S — save silently if named, open input if new
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+        e.preventDefault();
+        if (activeCanvasId) {
+          const current = listCanvases().find((c) => c.id === activeCanvasId);
+          if (current) { doSave(activeCanvasId, current.name); return; }
+        }
+        // No existing name — open the input
+        setSaveName("");
+        setShowSaveInput(true);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [activeCanvasId, doSave]);
+
+  // Delete a named canvas
+  const handleDeleteCanvas = useCallback(
+    (e: React.MouseEvent, id: string) => {
+      e.stopPropagation();
+      const updated = deleteCanvas(id);
+      setSavedCanvases(updated);
+      if (activeCanvasId === id) setActiveCanvasId(null);
+    },
+    [activeCanvasId]
+  );
 
   // Export PNG
   const exportPNG = useCallback(async () => {
     const api = apiRef.current;
     if (!api) return;
-    const elements = api.getSceneElements();
-    const appState = api.getAppState();
     const blob = await exportToBlob({
-      elements,
-      appState: { ...appState, exportBackground: true },
+      elements: api.getSceneElements(),
+      appState: { ...api.getAppState(), exportBackground: true },
       files: null,
     });
     const url = URL.createObjectURL(blob);
@@ -418,9 +564,7 @@ export default function CanvasClient() {
   const exportJSON = useCallback(() => {
     const api = apiRef.current;
     if (!api) return;
-    const elements = api.getSceneElements();
-    const appState = api.getAppState();
-    const json = serializeAsJSON(elements, appState, {}, "local");
+    const json = serializeAsJSON(api.getSceneElements(), api.getAppState(), {}, "local");
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -430,51 +574,148 @@ export default function CanvasClient() {
     URL.revokeObjectURL(url);
   }, []);
 
+  // New blank canvas — resets state without touching the saved list
+  const newCanvas = useCallback(() => {
+    const api = apiRef.current;
+    if (!api) return;
+    api.updateScene({ elements: [] });
+    setActiveTemplate(null);
+    setActiveCanvasId(null);
+    setShowSaveInput(false);
+    setSaveName("");
+    localStorage.removeItem(LS_DRAFT_KEY);
+    setSidebarTab("shapes");
+  }, []);
+
   // Clear canvas
   const clearCanvas = useCallback(() => {
     const api = apiRef.current;
     if (!api) return;
     api.updateScene({ elements: [] });
     setActiveTemplate(null);
-    localStorage.removeItem(LS_KEY);
+    setActiveCanvasId(null);
+    localStorage.removeItem(LS_DRAFT_KEY);
   }, []);
+
+  const atLimit = savedCanvases.length >= MAX_CANVASES;
 
   return (
     <div
       style={{ height: "calc(100dvh - 56px)" }}
       className="flex overflow-hidden bg-zinc-950"
     >
-      {/* ── Shape palette sidebar ── */}
-      <aside className="w-40 shrink-0 border-r border-zinc-800 bg-zinc-950 flex flex-col overflow-y-auto">
-        <div className="px-3 py-2.5 border-b border-zinc-800">
-          <p className="text-[10px] text-zinc-500 font-mono uppercase tracking-widest">
+      {/* ── Sidebar ── */}
+      <aside className="w-44 shrink-0 border-r border-zinc-800 bg-zinc-950 flex flex-col overflow-hidden">
+
+        {/* Tab bar */}
+        <div className="flex shrink-0 border-b border-zinc-800">
+          <button
+            onClick={() => setSidebarTab("shapes")}
+            className={`flex-1 py-2.5 text-[10px] font-mono uppercase tracking-widest transition-colors ${
+              sidebarTab === "shapes"
+                ? "text-zinc-200 border-b-2 border-violet-500"
+                : "text-zinc-600 hover:text-zinc-400"
+            }`}
+          >
             Shapes
-          </p>
+          </button>
+          <button
+            onClick={() => setSidebarTab("saved")}
+            className={`flex-1 py-2.5 text-[10px] font-mono uppercase tracking-widest transition-colors ${
+              sidebarTab === "saved"
+                ? "text-zinc-200 border-b-2 border-violet-500"
+                : "text-zinc-600 hover:text-zinc-400"
+            }`}
+          >
+            Saved{savedCanvases.length > 0 && ` (${savedCanvases.length})`}
+          </button>
         </div>
-        <div className="flex flex-col gap-0.5 p-1.5">
-          {SHAPES.map((shape) => (
-            <button
-              key={shape.id}
-              onClick={() => addShape(shape)}
-              className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left text-xs hover:bg-zinc-800 transition-colors group"
-            >
-              <span
-                className="text-sm font-mono w-5 text-center shrink-0 opacity-80"
-                style={{ color: shape.color }}
-              >
-                {shape.icon}
-              </span>
-              <span className="text-zinc-400 group-hover:text-zinc-200 transition-colors leading-tight">
-                {shape.label}
-              </span>
-            </button>
-          ))}
-        </div>
-        <div className="mt-auto px-3 py-3 border-t border-zinc-800">
-          <p className="text-[9px] text-zinc-700 leading-relaxed">
-            Click a shape to place it at the center of the canvas.
-          </p>
-        </div>
+
+        {sidebarTab === "shapes" ? (
+          <>
+            <div className="flex flex-col gap-0.5 p-1.5 overflow-y-auto flex-1">
+              {SHAPES.map((shape) => (
+                <button
+                  key={shape.id}
+                  onClick={() => addShape(shape)}
+                  className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left text-xs hover:bg-zinc-800 transition-colors group"
+                >
+                  <span
+                    className="text-sm font-mono w-5 text-center shrink-0 opacity-80"
+                    style={{ color: shape.color }}
+                  >
+                    {shape.icon}
+                  </span>
+                  <span className="text-zinc-400 group-hover:text-zinc-200 transition-colors leading-tight">
+                    {shape.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="px-3 py-3 border-t border-zinc-800 shrink-0">
+              <p className="text-[9px] text-zinc-700 leading-relaxed">
+                Click a shape to place it at the center of the canvas.
+              </p>
+            </div>
+          </>
+        ) : (
+          <>
+            {/* localStorage notice */}
+            <div className="px-3 py-2.5 border-b border-zinc-800 bg-zinc-900/40 shrink-0">
+              <p className="text-[9px] text-zinc-500 leading-relaxed">
+                Saved in browser localStorage — data stays on this device only and may be cleared by the browser.
+              </p>
+            </div>
+
+            {/* Canvas list */}
+            <div className="flex-1 overflow-y-auto">
+              {savedCanvases.length === 0 ? (
+                <div className="px-3 py-6 text-center">
+                  <p className="text-[10px] text-zinc-600">No saved canvases yet.</p>
+                  <p className="text-[9px] text-zinc-700 mt-1">Use the Save button to store your work.</p>
+                </div>
+              ) : (
+                savedCanvases.map((canvas) => (
+                  <button
+                    key={canvas.id}
+                    onClick={() => loadSavedCanvas(canvas)}
+                    className={`group w-full flex items-start gap-1.5 px-3 py-2.5 border-b border-zinc-900 text-left hover:bg-zinc-900/60 transition-colors ${
+                      activeCanvasId === canvas.id ? "bg-zinc-900" : ""
+                    }`}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <p
+                        className={`text-xs truncate leading-snug ${
+                          activeCanvasId === canvas.id ? "text-violet-300" : "text-zinc-300"
+                        }`}
+                      >
+                        {canvas.name}
+                      </p>
+                      <p className="text-[9px] text-zinc-600 mt-0.5">{formatAge(canvas.updatedAt)}</p>
+                    </div>
+                    <span
+                      role="button"
+                      onClick={(e) => handleDeleteCanvas(e, canvas.id)}
+                      className="opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-red-400 transition-colors text-xs pt-0.5 shrink-0 select-none"
+                      title="Delete"
+                    >
+                      ✕
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+
+            {/* Limit notice */}
+            <div className="px-3 py-2 border-t border-zinc-800 shrink-0">
+              <p className={`text-[9px] leading-relaxed ${atLimit ? "text-amber-600/80" : "text-zinc-700"}`}>
+                {atLimit
+                  ? "Limit reached (20/20). Saving a new canvas will drop the oldest."
+                  : `${savedCanvases.length} / ${MAX_CANVASES} canvases stored.`}
+              </p>
+            </div>
+          </>
+        )}
       </aside>
 
       {/* ── Canvas area ── */}
@@ -482,6 +723,13 @@ export default function CanvasClient() {
 
         {/* Toolbar */}
         <div className="h-10 shrink-0 border-b border-zinc-800 bg-zinc-950 flex items-center gap-2 px-3 overflow-x-auto">
+          <button
+            onClick={newCanvas}
+            className="px-2.5 py-1 rounded-lg text-xs border border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-zinc-500 hover:text-white transition-colors shrink-0"
+          >
+            + New
+          </button>
+          <span className="text-zinc-800 shrink-0">|</span>
           <span className="text-[10px] text-zinc-600 font-mono uppercase tracking-widest shrink-0">
             Templates:
           </span>
@@ -500,6 +748,44 @@ export default function CanvasClient() {
           ))}
 
           <div className="ml-auto flex items-center gap-1.5 shrink-0">
+            {/* Save flow */}
+            {showSaveInput ? (
+              <>
+                <input
+                  autoFocus
+                  value={saveName}
+                  onChange={(e) => setSaveName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitSave();
+                    if (e.key === "Escape") cancelSave();
+                  }}
+                  placeholder="Canvas name…"
+                  className="px-2 py-1 rounded-lg text-xs border border-violet-700 bg-zinc-900 text-zinc-200 placeholder:text-zinc-600 focus:outline-none w-32"
+                />
+                <button
+                  onClick={commitSave}
+                  disabled={!saveName.trim()}
+                  className="px-2.5 py-1 rounded-lg text-xs border border-violet-600 bg-violet-700/30 text-violet-300 hover:bg-violet-700/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={cancelSave}
+                  className="px-1.5 py-1 text-zinc-600 hover:text-zinc-400 transition-colors text-xs"
+                >
+                  ✕
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={handleSaveClick}
+                title="Save canvas (⌘S)"
+                className="px-2.5 py-1 rounded-lg text-xs border border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-violet-700 hover:text-violet-400 transition-colors"
+              >
+                Save
+              </button>
+            )}
+
             <button
               onClick={exportPNG}
               className="px-2.5 py-1 rounded-lg text-xs border border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200 transition-colors"
