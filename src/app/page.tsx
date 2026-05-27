@@ -2,6 +2,7 @@ import Link from "next/link";
 import { principleRegistry, CATEGORY_META } from "@/lib/registry";
 import { CategoryBadge, ComplexityBadge, LevelBadge, PopularityStars } from "@/components/ui/Badge";
 import { StackOverview } from "@/components/StackOverview";
+import { BlueprintsSection } from "@/components/BlueprintsSection";
 import type { Category } from "@/types/principle";
 
 const FEATURED_SLUGS = [
@@ -43,6 +44,7 @@ const HIGHLIGHTS = [
     color: "text-emerald-400",
   },
 ];
+
 
 const USAGE_MAP: Array<{
   system: string;
@@ -213,6 +215,11 @@ export default function HomePage() {
             );
           })}
         </div>
+      </section>
+
+      {/* Real-world blueprints */}
+      <section>
+        <BlueprintsSection />
       </section>
 
       {/* Where they're used */}

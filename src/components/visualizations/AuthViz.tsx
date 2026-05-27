@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 
-type Tab = "oauth" | "jwt";
+type Tab = "oauth" | "jwt" | "verify";
 type JwtPart = "header" | "payload" | "signature";
 
 const ACTORS = [
@@ -242,6 +242,197 @@ function JwtAnatomy() {
   );
 }
 
+const VERIFY_STEPS = [
+  {
+    label: "Receive Bearer token",
+    code: `// HTTP request arrives\nconst auth = req.headers["authorization"];\nif (!auth?.startsWith("Bearer ")) return res.status(401).end();\nconst token = auth.slice(7);`,
+    detail: "Extract the token from the Authorization header. Any request without a valid Bearer prefix is rejected immediately with 401 — before any crypto work.",
+    tag: "receive",
+  },
+  {
+    label: "Parse the JWT structure",
+    code: `const [rawHeader, rawPayload, rawSig] = token.split(".");\nconst header  = JSON.parse(Buffer.from(rawHeader, "base64url").toString());\n// header → { alg: "RS256", typ: "JWT", kid: "key-2024-01" }\nconst payload = JSON.parse(Buffer.from(rawPayload, "base64url").toString());\n// payload → { sub, iss, aud, exp, iat, scope }`,
+    detail: "Split on '.' to get header, payload, and signature. Decode header and payload from base64url. Do NOT trust any claim yet — the signature has not been verified.",
+    tag: "parse",
+  },
+  {
+    label: "Fetch public keys (JWKS)",
+    code: `// Cache keys by kid to avoid fetching on every request\nconst cached = jwksCache.get(header.kid);\nconst publicKey = cached\n  ?? await fetchJWKS("https://auth.example.com/.well-known/jwks.json", header.kid);\n// JWKS endpoint returns the auth server's current public key set`,
+    detail: "Fetch the Auth Server's public key set from its well-known JWKS endpoint. Cache by kid with a short TTL (e.g. 1h). Only re-fetch on cache miss or an unknown kid — never on every request.",
+    tag: "jwks",
+  },
+  {
+    label: "Verify RS256 signature",
+    code: `const data = rawHeader + "." + rawPayload;\nconst isValid = await crypto.subtle.verify(\n  { name: "RSASSA-PKCS1-v1_5" },\n  publicKey,\n  Buffer.from(rawSig, "base64url"),\n  Buffer.from(data)\n);\nif (!isValid) return res.status(401).json({ error: "invalid_signature" });`,
+    detail: "Verify that RSASHA256(header.payload, Auth_Server_Private_Key) matches the signature. If valid, the token was definitely issued by the Auth Server and has not been tampered with. Any bit flip in header or payload changes the hash.",
+    tag: "signature",
+  },
+  {
+    label: "Validate standard claims",
+    code: `const now = Math.floor(Date.now() / 1000);\nif (payload.exp < now)                        throw err(401, "token_expired");\nif (payload.iss !== EXPECTED_ISSUER)           throw err(401, "invalid_issuer");\nif (!payload.aud.includes(MY_API_AUDIENCE))   throw err(401, "invalid_audience");\nif (!hasScope(payload.scope, requiredScope))  throw err(403, "insufficient_scope");`,
+    detail: "The signature proves the token is authentic; claims prove it's authorized for this request. The aud check is critical — without it, a token issued for api-a.example.com could be replayed against api-b.example.com (confused deputy attack).",
+    tag: "claims",
+  },
+  {
+    label: "Check revocation (optional)",
+    code: `// Strategy A — accept the expiry window (common for short-lived tokens)\n// Strategy B — jti blocklist in Redis\nif (await redis.exists(\`revoked:\${payload.jti}\`)) throw err(401, "token_revoked");\n// Strategy C — introspection endpoint (adds a network hop)\nconst { active } = await POST("/introspect", { token });\nif (!active) throw err(401, "token_revoked");`,
+    detail: "JWT is stateless — a valid signature always passes. Revocation requires extra state. Choose based on your risk tolerance: short expiry (5–15 min) is simplest; a jti Redis blocklist is fast; token introspection is authoritative but adds latency.",
+    tag: "revoke",
+  },
+];
+
+const JWKS_EXAMPLE = `{
+  "keys": [
+    {
+      "kty": "RSA",
+      "use": "sig",
+      "alg": "RS256",
+      "kid": "key-2024-01",
+      "n":   "0vx7agoebGcQSuuPiLJXZptN9nndrQmbX...",
+      "e":   "AQAB"
+    }
+  ]
+}`;
+
+const REVOCATION_STRATEGIES = [
+  {
+    name: "Short expiry",
+    how: "Set exp to 5–15 min. Use refresh tokens for long-lived sessions.",
+    pro: "No extra infrastructure. Pure stateless.",
+    con: "Leaked token valid until expiry. Revocation takes minutes.",
+    risk: "Low–medium",
+  },
+  {
+    name: "jti blocklist",
+    how: "Store revoked token IDs (jti claim) in Redis with TTL = exp.",
+    pro: "Immediate revocation. No Auth Server round-trip.",
+    con: "Requires shared cache. All instances must hit it.",
+    risk: "Very low",
+  },
+  {
+    name: "Token introspection",
+    how: "POST /introspect to Auth Server on every request.",
+    pro: "Always authoritative. Instant revocation.",
+    con: "Extra network hop per request. Auth Server becomes hot path.",
+    risk: "Very low",
+  },
+  {
+    name: "Refresh rotation",
+    how: "Short access tokens + rotate refresh token on every use.",
+    pro: "Stolen refresh token detected on reuse (RFC 6749 §10.4).",
+    con: "Access token still valid until expiry after logout.",
+    risk: "Low",
+  },
+];
+
+function TokenVerify() {
+  const [activeStep, setActiveStep] = useState(0);
+  const step = VERIFY_STEPS[activeStep];
+
+  const tagColor: Record<string, string> = {
+    receive:   "text-zinc-400 bg-zinc-800/60 border-zinc-700",
+    parse:     "text-blue-400 bg-blue-950/30 border-blue-800/50",
+    jwks:      "text-amber-400 bg-amber-950/30 border-amber-800/50",
+    signature: "text-violet-400 bg-violet-950/30 border-violet-800/50",
+    claims:    "text-emerald-400 bg-emerald-950/30 border-emerald-800/50",
+    revoke:    "text-rose-400 bg-rose-950/30 border-rose-800/50",
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+
+      {/* Vertical step pipeline */}
+      <div className="flex flex-col sm:flex-row gap-4">
+        {/* Step list */}
+        <div className="flex sm:flex-col gap-1.5 overflow-x-auto sm:overflow-visible shrink-0 pb-1 sm:pb-0">
+          {VERIFY_STEPS.map((s, i) => (
+            <button
+              key={i}
+              onClick={() => setActiveStep(i)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-left whitespace-nowrap sm:whitespace-normal transition-colors ${
+                i === activeStep
+                  ? `${tagColor[s.tag]} font-medium`
+                  : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700"
+              }`}
+            >
+              <span className={`text-xs font-mono w-4 shrink-0 ${i === activeStep ? "" : "text-zinc-700"}`}>
+                {i + 1}
+              </span>
+              <span className="text-xs">{s.label}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Step detail */}
+        <div className={`flex-1 flex flex-col gap-3 rounded-xl border p-4 ${tagColor[step.tag]}`}>
+          <div className="text-xs font-semibold uppercase tracking-wide">
+            Step {activeStep + 1} — {step.label}
+          </div>
+          <pre className="text-xs font-mono text-zinc-300 bg-zinc-900/70 rounded-lg p-3 overflow-x-auto leading-relaxed">
+            {step.code}
+          </pre>
+          <p className="text-xs text-zinc-400 leading-relaxed">{step.detail}</p>
+        </div>
+      </div>
+
+      {/* JWKS endpoint */}
+      <div className="flex flex-col gap-2">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-amber-400">
+          JWKS Endpoint — <code className="font-mono normal-case">/.well-known/jwks.json</code>
+        </h4>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <pre className="text-xs font-mono text-zinc-300 bg-zinc-900/70 rounded-lg p-3 border border-zinc-800 overflow-x-auto leading-relaxed">
+            {JWKS_EXAMPLE}
+          </pre>
+          <ul className="flex flex-col gap-2 text-xs text-zinc-400 justify-center">
+            {[
+              ["kty", "Key type — RSA"],
+              ["use", "sig = signing key (vs enc = encryption)"],
+              ["kid", "Key ID — matched against JWT header kid"],
+              ["n / e", "RSA public key modulus + exponent"],
+              ["alg", "RS256 — the only algorithm to accept"],
+            ].map(([k, v]) => (
+              <li key={k} className="flex gap-2">
+                <code className="text-amber-400 shrink-0">{k}</code>
+                <span>{v}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+
+      {/* Revocation strategies */}
+      <div className="flex flex-col gap-2">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-rose-400">
+          Revocation Strategies
+        </h4>
+        <div className="grid sm:grid-cols-2 gap-2">
+          {REVOCATION_STRATEGIES.map((s) => (
+            <div key={s.name} className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-3 flex flex-col gap-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-zinc-200">{s.name}</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded border font-mono ${
+                  s.risk === "Very low"
+                    ? "border-emerald-800/50 bg-emerald-950/30 text-emerald-400"
+                    : "border-amber-800/50 bg-amber-950/30 text-amber-400"
+                }`}>
+                  risk: {s.risk}
+                </span>
+              </div>
+              <p className="text-xs text-zinc-500">{s.how}</p>
+              <div className="flex flex-col gap-0.5">
+                <p className="text-xs text-emerald-400 flex gap-1.5"><span>+</span>{s.pro}</p>
+                <p className="text-xs text-red-400 flex gap-1.5"><span>−</span>{s.con}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+    </div>
+  );
+}
+
 export function AuthViz() {
   const [tab, setTab]             = useState<Tab>("oauth");
   const [activeStep, setActiveStep] = useState(0);
@@ -271,7 +462,7 @@ export function AuthViz() {
     <div className="flex flex-col gap-4">
       {/* Tabs */}
       <div className="flex gap-1 bg-zinc-900 rounded-lg p-1 w-fit">
-        {(["oauth", "jwt"] as Tab[]).map((t) => (
+        {(["oauth", "jwt", "verify"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -279,7 +470,7 @@ export function AuthViz() {
               tab === t ? "bg-zinc-700 text-white" : "text-zinc-500 hover:text-zinc-300"
             }`}
           >
-            {t === "oauth" ? "OAuth 2.0 + PKCE Flow" : "JWT Anatomy"}
+            {t === "oauth" ? "OAuth 2.0 + PKCE Flow" : t === "jwt" ? "JWT Anatomy" : "Token Verification"}
           </button>
         ))}
       </div>
@@ -453,7 +644,8 @@ export function AuthViz() {
         </div>
       )}
 
-      {tab === "jwt" && <JwtAnatomy />}
+      {tab === "jwt"    && <JwtAnatomy />}
+      {tab === "verify" && <TokenVerify />}
     </div>
   );
 }
