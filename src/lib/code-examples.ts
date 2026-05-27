@@ -2015,4 +2015,213 @@ impl OrderObserver for EmailNotifier {
       },
     ],
   },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // AUTHENTICATION
+  // ─────────────────────────────────────────────────────────────────────────
+  "authentication": {
+    projectStructure: `src/
+├── auth/
+│   ├── pkce.ts              # PKCE helpers (code_verifier + challenge)
+│   ├── token.ts             # JWT sign, verify, refresh
+│   ├── oauth-client.ts      # Authorization Code + PKCE flow
+│   └── middleware.ts        # Request auth guard
+├── routes/
+│   ├── login.ts             # GET /login → redirect to Auth Server
+│   ├── callback.ts          # GET /callback → exchange code for tokens
+│   └── protected.ts         # Routes guarded by auth middleware
+└── config/
+    └── auth.ts              # client_id, scopes, JWKS URL, issuer`,
+    examples: [
+      {
+        language: "typescript",
+        label: "TypeScript",
+        code: `// auth/pkce.ts — PKCE helpers (RFC 7636)
+import crypto from "crypto";
+
+export function generateCodeVerifier(): string {
+  return crypto.randomBytes(64).toString("base64url").slice(0, 128);
+}
+
+export function generateCodeChallenge(verifier: string): string {
+  return crypto.createHash("sha256").update(verifier).digest("base64url");
+}
+
+// auth/oauth-client.ts — Authorization Code + PKCE flow
+export function buildAuthorizationUrl(params: {
+  authEndpoint: string;
+  clientId: string;
+  redirectUri: string;
+  scopes: string[];
+  codeChallenge: string;
+  state: string;
+}): string {
+  const url = new URL(params.authEndpoint);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", params.clientId);
+  url.searchParams.set("redirect_uri", params.redirectUri);
+  url.searchParams.set("scope", params.scopes.join(" "));
+  url.searchParams.set("state", params.state);
+  url.searchParams.set("code_challenge", params.codeChallenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  return url.toString();
+}
+
+export async function exchangeCodeForTokens(params: {
+  tokenEndpoint: string;
+  clientId: string;
+  code: string;
+  codeVerifier: string;
+  redirectUri: string;
+}): Promise<{ access_token: string; refresh_token: string; id_token?: string }> {
+  const res = await fetch(params.tokenEndpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: params.clientId,
+      code: params.code,
+      code_verifier: params.codeVerifier,
+      redirect_uri: params.redirectUri,
+    }),
+  });
+  if (!res.ok) throw new Error(\`Token exchange failed: \${res.status}\`);
+  return res.json();
+}
+
+// auth/token.ts — JWT verification (stateless, no DB lookup)
+import { createRemoteJWKSet, jwtVerify } from "jose";
+
+const JWKS = createRemoteJWKSet(
+  new URL("https://auth.example.com/.well-known/jwks.json")
+);
+
+export async function verifyAccessToken(token: string) {
+  const { payload } = await jwtVerify(token, JWKS, {
+    issuer: "https://auth.example.com",
+    audience: "https://api.example.com",
+  });
+  return payload; // typed: sub, scope, exp, iat, ...
+}
+
+// auth/middleware.ts — Express/Next.js auth guard
+export async function requireAuth(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing token" });
+  }
+  try {
+    req.user = await verifyAccessToken(auth.slice(7));
+    next();
+  } catch {
+    res.status(401).json({ error: "Invalid or expired token" });
+  }
+}`,
+      },
+      {
+        language: "go",
+        label: "Go",
+        code: `// auth/pkce.go — PKCE helpers
+package auth
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+)
+
+func GenerateCodeVerifier() (string, error) {
+	b := make([]byte, 64)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b)[:96], nil
+}
+
+func GenerateCodeChallenge(verifier string) string {
+	h := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
+// auth/token.go — JWT verification via JWKS
+package auth
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jwt"
+)
+
+type Claims struct {
+	Subject string
+	Email   string
+	Scope   string
+}
+
+type Verifier struct {
+	cache   *jwk.Cache
+	issuer  string
+	audience string
+}
+
+func NewVerifier(jwksURL, issuer, audience string) (*Verifier, error) {
+	cache := jwk.NewCache(context.Background())
+	if err := cache.Register(jwksURL, jwk.WithMinRefreshInterval(15*time.Minute)); err != nil {
+		return nil, err
+	}
+	return &Verifier{cache: cache, issuer: issuer, audience: audience}, nil
+}
+
+func (v *Verifier) Verify(ctx context.Context, tokenStr string) (*Claims, error) {
+	keySet, err := v.cache.Get(ctx, v.issuer+"/.well-known/jwks.json")
+	if err != nil {
+		return nil, fmt.Errorf("fetch JWKS: %w", err)
+	}
+	token, err := jwt.Parse([]byte(tokenStr),
+		jwt.WithKeySet(keySet),
+		jwt.WithValidate(true),
+		jwt.WithIssuer(v.issuer),
+		jwt.WithAudience(v.audience),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("invalid token: %w", err)
+	}
+	scope, _ := token.Get("scope")
+	email, _ := token.Get("email")
+	return &Claims{
+		Subject: token.Subject(),
+		Email:   fmt.Sprint(email),
+		Scope:   fmt.Sprint(scope),
+	}, nil
+}
+
+// auth/middleware.go — HTTP auth guard
+func AuthMiddleware(v *Verifier) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := r.Header.Get("Authorization")
+			if !strings.HasPrefix(header, "Bearer ") {
+				http.Error(w, "missing token", http.StatusUnauthorized)
+				return
+			}
+			claims, err := v.Verify(r.Context(), strings.TrimPrefix(header, "Bearer "))
+			if err != nil {
+				http.Error(w, "invalid token", http.StatusUnauthorized)
+				return
+			}
+			ctx := context.WithValue(r.Context(), claimsKey{}, claims)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}`,
+      },
+    ],
+  },
 };

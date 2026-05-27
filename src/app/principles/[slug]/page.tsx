@@ -21,6 +21,7 @@ import { EventSourcingViz } from "@/components/visualizations/EventSourcingViz";
 import { ServiceMeshViz } from "@/components/visualizations/ServiceMeshViz";
 import { CDNViz } from "@/components/visualizations/CDNViz";
 import { LoadBalancingViz } from "@/components/visualizations/LoadBalancingViz";
+import { AuthViz } from "@/components/visualizations/AuthViz";
 
 interface Props {
   params: Promise<{ slug: string }>;
@@ -56,6 +57,7 @@ function Viz({ slug }: { slug: string }) {
     case "service-mesh":         return <ServiceMeshViz />;
     case "cdn":                  return <CDNViz />;
     case "load-balancing":       return <LoadBalancingViz />;
+    case "authentication":       return <AuthViz />;
     default:                     return null;
   }
 }

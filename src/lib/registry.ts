@@ -445,6 +445,47 @@ export const principleRegistry: Principle[] = [
     tags: ["frontend", "mobile", "web", "sam-newman", "aggregation"],
     implemented: false,
   },
+  {
+    slug: "authentication",
+    name: "Authentication & Authorization",
+    category: "architecture",
+    complexity: "intermediate",
+    level: "system",
+    popularity: 5,
+    year: 2006,
+    summary:
+      "Verify who a user is (AuthN) and what they can do (AuthZ) — the security layer every system must design from the ground up, not bolt on later.",
+    description:
+      "Authentication (AuthN) answers 'who are you?' — verifying identity by checking a credential: a password, hardware key, biometric, or a signed assertion from a trusted identity provider.\n\nAuthorisation (AuthZ) answers 'what can you do?' — once identity is established, determining which resources and operations are permitted for that identity.\n\nFour strategies dominate modern systems:\n\n**Session-based auth (stateful):** Server creates a session record in a database or cache, sends the session ID as a cookie. Every request requires a store lookup. Simple, easy to invalidate instantly, but requires a shared session store for horizontal scaling.\n\n**JWT / Token-based auth (stateless):** Server issues a signed JSON Web Token (header.payload.signature) containing identity claims. The client sends it on every request; the server verifies the cryptographic signature — no database lookup. Scales horizontally, but tokens cannot be revoked before expiry without maintaining a blocklist.\n\n**OAuth 2.0:** A delegation protocol — not an authentication protocol. Lets a user grant a third-party application scoped access to their resources without sharing passwords. The Authorization Code + PKCE flow (RFC 7636) is the standard for web and mobile apps. PKCE prevents code interception attacks by binding the token exchange to the party that initiated the flow.\n\n**OpenID Connect (OIDC):** An identity layer on top of OAuth 2.0. Adds an id_token — a signed JWT asserting who the user is. Google, GitHub, Apple, and Azure AD all expose OIDC endpoints, making it the standard for federated login ('Sign in with Google').",
+    whyItMatters:
+      "Authentication is the first line of defence for every system. Bolting it on after the fact is expensive and error-prone — broken auth is the #2 OWASP risk. Designing the identity model early (session vs token, internal vs federated) shapes API design, scalability, and compliance posture for the life of the system.",
+    whenToUse: [
+      "Any system where users have accounts or different users see different data",
+      "APIs accessed by third-party clients — use OAuth 2.0 + PKCE",
+      "Microservices requiring service-to-service auth — use JWTs with short expiry",
+      "B2B products needing enterprise SSO — implement OIDC or SAML",
+      "Mobile apps — Authorization Code + PKCE, never implicit flow",
+    ],
+    whenNotToUse: [
+      "Fully public read-only APIs with no user data — auth adds overhead with no benefit",
+      "Internal tooling behind a VPN with no external exposure may not need full OAuth",
+    ],
+    tradeoffs: [
+      { pro: "JWTs are stateless — any server instance verifies without a DB call", con: "JWTs cannot be revoked before expiry without a blocklist (adds statefulness back)" },
+      { pro: "OAuth 2.0 enables delegated access without sharing credentials", con: "OAuth 2.0 is a complex spec — wrong implementation creates severe vulnerabilities" },
+      { pro: "OIDC / federated login removes password management burden", con: "External IdP becomes a hard dependency — their outage prevents all logins" },
+      { pro: "Short-lived access tokens + refresh tokens balance security and UX", con: "Token rotation logic (refresh, revoke, re-issue) adds implementation surface area" },
+    ],
+    realWorld: [
+      { company: "Google", usage: "OIDC provider for 'Sign in with Google' — issues id_token + access_token via Authorization Code + PKCE" },
+      { company: "GitHub", usage: "OAuth 2.0 for third-party app access; fine-grained PATs for CI/CD service accounts" },
+      { company: "Stripe", usage: "OAuth 2.0 Connect for platforms; API keys with restricted scopes for server-to-server calls" },
+      { company: "AWS", usage: "STS issues short-lived JWT tokens (IAM role credentials); Cognito provides OIDC for user pools" },
+    ],
+    related: ["api-gateway", "microservices", "separation-of-concerns", "zero-trust"],
+    tags: ["oauth2", "jwt", "oidc", "pkce", "session", "authz", "authn", "bearer-token", "refresh-token"],
+    implemented: true,
+  },
   // ──────────────────────────────────────────────────────────────────────
   // INFRASTRUCTURE
   // ──────────────────────────────────────────────────────────────────────
