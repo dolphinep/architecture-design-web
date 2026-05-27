@@ -7,6 +7,7 @@ import {
   serializeAsJSON,
   convertToExcalidrawElements,
   viewportCoordsToSceneCoords,
+  restoreElements,
 } from "@excalidraw/excalidraw";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Skeleton = any;
@@ -375,16 +376,20 @@ function deleteCanvas(id: string): SavedCanvas[] {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function loadDraft(): any {
   try {
-    const draft = localStorage.getItem(LS_DRAFT_KEY);
-    if (draft) return JSON.parse(draft);
-    // Migrate from the previous single-canvas key
-    const legacy = localStorage.getItem("arch-design-canvas-v1");
-    if (legacy) {
-      localStorage.setItem(LS_DRAFT_KEY, legacy);
-      localStorage.removeItem("arch-design-canvas-v1");
-      return JSON.parse(legacy);
-    }
-    return null;
+    const raw =
+      localStorage.getItem(LS_DRAFT_KEY) ??
+      (() => {
+        const legacy = localStorage.getItem("arch-design-canvas-v1");
+        if (legacy) {
+          localStorage.setItem(LS_DRAFT_KEY, legacy);
+          localStorage.removeItem("arch-design-canvas-v1");
+        }
+        return legacy;
+      })();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    // Repair fractional indices — avoids the "invariant compromised" error
+    return { ...parsed, elements: restoreElements(parsed.elements ?? [], null) };
   } catch { return null; }
 }
 
@@ -470,7 +475,8 @@ export default function CanvasClient() {
     if (!api) return;
     try {
       const parsed = JSON.parse(canvas.data);
-      api.updateScene({ elements: parsed.elements ?? [] });
+      const elements = restoreElements(parsed.elements ?? [], null);
+      api.updateScene({ elements });
       setActiveCanvasId(canvas.id);
       setActiveTemplate(null);
     } catch {}

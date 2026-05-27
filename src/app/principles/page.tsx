@@ -2,7 +2,7 @@
 import { useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { principleRegistry, CATEGORIES, LEVELS, LEVEL_META } from "@/lib/registry";
+import { principleRegistry, CATEGORIES, LEVELS, LEVEL_META, GROUP_META, GROUP_ORDER } from "@/lib/registry";
 import { CategoryBadge, ComplexityBadge, LevelBadge, PopularityStars } from "@/components/ui/Badge";
 import { StackOverview } from "@/components/StackOverview";
 import type { Level } from "@/types/principle";
@@ -41,6 +41,38 @@ function PrinciplesContent() {
   });
 
   const popularFirst = [...filtered].sort((a, b) => b.popularity - a.popularity || a.name.localeCompare(b.name));
+
+  // Build group sections — grouped principles appear under labelled headers,
+  // ungrouped (system/infra/cloud/network) render below without a header.
+  const hasGroups = popularFirst.some((p) => p.group);
+  type Section = { key: string; label?: string; description?: string; items: typeof popularFirst };
+  const sections: Section[] = (() => {
+    if (!hasGroups) return [{ key: "__all", items: popularFirst }];
+    const map = new Map<string, typeof popularFirst>();
+    const ungrouped: typeof popularFirst = [];
+    for (const p of popularFirst) {
+      if (p.group) {
+        if (!map.has(p.group)) map.set(p.group, []);
+        map.get(p.group)!.push(p);
+      } else {
+        ungrouped.push(p);
+      }
+    }
+    const result: Section[] = [];
+    for (const g of GROUP_ORDER) {
+      if (map.has(g)) {
+        result.push({ key: g, label: GROUP_META[g]?.label, description: GROUP_META[g]?.description, items: map.get(g)! });
+      }
+    }
+    // Any group not in GROUP_ORDER (future-proof)
+    for (const [g, items] of map) {
+      if (!GROUP_ORDER.includes(g as typeof GROUP_ORDER[number])) {
+        result.push({ key: g, label: GROUP_META[g]?.label, items });
+      }
+    }
+    if (ungrouped.length > 0) result.push({ key: "__other", items: ungrouped });
+    return result;
+  })();
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-10 flex flex-col gap-8">
@@ -175,36 +207,50 @@ function PrinciplesContent() {
         popularFirst.length === 0 ? (
           <p className="text-zinc-500 py-8 text-center">No principles match your filters.</p>
         ) : (
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {popularFirst.map((p) => (
-              <Link
-                key={p.slug}
-                href={`/principles/${p.slug}`}
-                className="group rounded-xl border border-zinc-800 bg-zinc-900/30 p-5 hover:border-zinc-700 hover:bg-zinc-900/60 transition-all flex flex-col gap-3"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <h3 className="font-semibold text-zinc-100 group-hover:text-white transition-colors leading-snug">
-                    {p.name}
-                  </h3>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {p.implemented && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 border border-violet-500/20">
-                        Live
-                      </span>
-                    )}
-                    {p.year && (
-                      <span className="text-[10px] text-zinc-600 font-mono">{p.year}</span>
+          <div className="flex flex-col gap-8">
+            {sections.map((section) => (
+              <div key={section.key}>
+                {section.label && (
+                  <div className="mb-4">
+                    <h2 className="text-sm font-semibold text-zinc-300">{section.label}</h2>
+                    {section.description && (
+                      <p className="text-xs text-zinc-600 mt-0.5">{section.description}</p>
                     )}
                   </div>
+                )}
+                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {section.items.map((p) => (
+                    <Link
+                      key={p.slug}
+                      href={`/principles/${p.slug}`}
+                      className="group rounded-xl border border-zinc-800 bg-zinc-900/30 p-5 hover:border-zinc-700 hover:bg-zinc-900/60 transition-all flex flex-col gap-3"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <h3 className="font-semibold text-zinc-100 group-hover:text-white transition-colors leading-snug">
+                          {p.name}
+                        </h3>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {p.implemented && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 border border-violet-500/20">
+                              Live
+                            </span>
+                          )}
+                          {p.year && (
+                            <span className="text-[10px] text-zinc-600 font-mono">{p.year}</span>
+                          )}
+                        </div>
+                      </div>
+                      <p className="text-sm text-zinc-500 leading-relaxed">{p.summary}</p>
+                      <div className="flex flex-wrap gap-2 mt-auto pt-2 items-center">
+                        <LevelBadge level={p.level} />
+                        <CategoryBadge category={p.category} />
+                        <ComplexityBadge complexity={p.complexity} />
+                      </div>
+                      <PopularityStars value={p.popularity} />
+                    </Link>
+                  ))}
                 </div>
-                <p className="text-sm text-zinc-500 leading-relaxed">{p.summary}</p>
-                <div className="flex flex-wrap gap-2 mt-auto pt-2 items-center">
-                  <LevelBadge level={p.level} />
-                  <CategoryBadge category={p.category} />
-                  <ComplexityBadge complexity={p.complexity} />
-                </div>
-                <PopularityStars value={p.popularity} />
-              </Link>
+              </div>
             ))}
           </div>
         )

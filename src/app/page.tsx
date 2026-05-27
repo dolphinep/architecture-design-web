@@ -127,6 +127,12 @@ export default function HomePage() {
           >
             Try Clean Architecture →
           </Link>
+          <Link
+            href="/canvas"
+            className="px-5 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 font-medium transition-colors text-sm border border-zinc-800 hover:border-zinc-700"
+          >
+            ✏ Draw diagrams
+          </Link>
         </div>
       </section>
 
@@ -244,6 +250,31 @@ export default function HomePage() {
             </div>
           ))}
         </div>
+      </section>
+
+      {/* Canvas CTA */}
+      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-8 flex flex-col sm:flex-row items-center gap-8">
+        <div className="flex flex-col gap-3 flex-1">
+          <div className="flex items-center gap-2.5">
+            <span className="text-violet-400 text-lg">✏</span>
+            <h2 className="text-xl font-semibold text-white">Draw your own architecture</h2>
+          </div>
+          <p className="text-sm text-zinc-400 leading-relaxed max-w-lg">
+            Sketch diagrams with pre-built architecture shapes — services, databases, queues, gateways, and more. Save up to 20 canvases in your browser and export as PNG or JSON.
+          </p>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-600 font-mono mt-1">
+            <span>10 shape types</span>
+            <span>4 starter templates</span>
+            <span>local save · ⌘S</span>
+            <span>PNG + JSON export</span>
+          </div>
+        </div>
+        <Link
+          href="/canvas"
+          className="shrink-0 px-6 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-medium transition-colors text-sm whitespace-nowrap"
+        >
+          Open canvas →
+        </Link>
       </section>
 
       {/* What you get */}

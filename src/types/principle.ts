@@ -48,4 +48,6 @@ export interface Principle {
   /** true = interactive visualization available */
   implemented: boolean;
   year?: number;
+  /** Sub-group within a level, e.g. "oop" | "solid" | "functional" | "general" | "design-patterns" */
+  group?: string;
 }
