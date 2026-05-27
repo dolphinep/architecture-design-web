@@ -11,7 +11,6 @@ import {
 } from "@excalidraw/excalidraw";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Skeleton = any;
-import "@excalidraw/excalidraw/index.css";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
