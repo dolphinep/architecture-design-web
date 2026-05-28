@@ -106,7 +106,7 @@ export default function HomePage() {
 
         <h1 className="text-5xl sm:text-6xl font-bold tracking-tight text-white max-w-3xl leading-tight">
           Understand architecture,{" "}
-          <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-400 to-indigo-400">
+          <span className="text-transparent bg-clip-text bg-linear-to-r from-violet-400 to-indigo-400">
             visually
           </span>
         </h1>
