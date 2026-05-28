@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import Link from "next/link";
 import { principleRegistry } from "@/lib/registry";
 
@@ -317,18 +317,46 @@ const BLUEPRINTS = [
 
 export function BlueprintsSection() {
   const [selected, setSelected] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  function scroll(dir: "left" | "right") {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollBy({ left: dir === "right" ? 320 : -320, behavior: "smooth" });
+  }
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h2 className="text-xl font-semibold text-white">How real systems combine patterns</h2>
-        <p className="text-sm text-zinc-500 mt-1">
-          Production architectures are never one pattern — they&apos;re a deliberate stack of complementary decisions.
-          Click any card to see how the components connect.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-semibold text-white">How real systems combine patterns</h2>
+          <p className="text-sm text-zinc-500 mt-1">
+            Production architectures are never one pattern — they&apos;re a deliberate stack of complementary decisions.
+            Click any card to see how the components connect.
+          </p>
+        </div>
+        <div className="flex gap-1 shrink-0 mt-1">
+          <button
+            onClick={() => scroll("left")}
+            className="px-2.5 py-1.5 rounded-lg border border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700 transition-colors text-sm"
+          >
+            ←
+          </button>
+          <button
+            onClick={() => scroll("right")}
+            className="px-2.5 py-1.5 rounded-lg border border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700 transition-colors text-sm"
+          >
+            →
+          </button>
+        </div>
       </div>
 
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      {/* Carousel */}
+      <div
+        ref={scrollRef}
+        className="flex gap-4 overflow-x-auto pb-2 scroll-smooth"
+        style={{ scrollSnapType: "x mandatory", scrollbarWidth: "none" }}
+      >
         {BLUEPRINTS.map(({ company, industry, scale, challenge, principles, story, accent, tag }) => {
           const resolved = principles.map((slug) => ({
             slug,
@@ -339,8 +367,9 @@ export function BlueprintsSection() {
             <button
               key={company}
               onClick={() => setSelected(isSelected ? null : company)}
-              className={`text-left rounded-xl border p-5 flex flex-col gap-4 transition-all cursor-pointer ${accent} ${
-                isSelected ? "ring-2 ring-white/20 scale-[1.01]" : "hover:scale-[1.005]"
+              style={{ scrollSnapAlign: "start", minWidth: "300px", maxWidth: "300px" }}
+              className={`text-left rounded-xl border p-5 flex flex-col gap-4 transition-all cursor-pointer flex-shrink-0 ${accent} ${
+                isSelected ? "ring-2 ring-white/20" : "hover:brightness-110"
               }`}
             >
               <div className="flex items-start justify-between gap-3">
