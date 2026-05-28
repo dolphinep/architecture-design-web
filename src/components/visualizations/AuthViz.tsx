@@ -93,6 +93,201 @@ const STEPS: Step[] = [
 
 const SVG_H = Y0 + STEPS.length * DY + 30;
 
+// ── Refresh token flow ────────────────────────────────────────────────────────
+
+const R_ACTORS = [
+  { label: "Client App",      sub: "Your App",       x: 100 },
+  { label: "Auth Server",     sub: "Google / Auth0", x: 310 },
+  { label: "Resource Server", sub: "Your API",       x: 520 },
+];
+
+interface RefreshStep {
+  from: number; to: number;
+  label: string; detail: string;
+  color: string; dashed?: boolean;
+}
+
+const REFRESH_STEPS: RefreshStep[] = [
+  {
+    from: 2, to: 0,
+    label: "401 Unauthorized — token expired",
+    detail: "The access token's exp claim is in the past. Resource Server rejects the request with 401. Client detects this and starts the silent refresh — no user interaction needed.",
+    color: "#ef4444", dashed: true,
+  },
+  {
+    from: 0, to: 1,
+    label: "POST /token  grant_type=refresh_token",
+    detail: "Client sends a direct server-to-server POST to the token endpoint: grant_type=refresh_token, refresh_token=<opaque_value>, client_id=…. No user redirect, no browser involvement — this is a background call.",
+    color: "#6366f1",
+  },
+  {
+    from: 1, to: 0,
+    label: "new access_token + rotated refresh_token",
+    detail: "Auth Server validates the refresh token: checks it exists in its store, hasn't expired, and hasn't been revoked. Issues a fresh access_token (JWT, ~15min) and a NEW refresh_token (rotation). The old refresh token is immediately invalidated — reuse of an old token is a theft signal.",
+    color: "#34d399", dashed: true,
+  },
+  {
+    from: 0, to: 2,
+    label: "Retry: GET /api  Bearer <new_access_token>",
+    detail: "Client transparently retries the original failed request with the new access token. The user never saw an interruption — to them the app just worked.",
+    color: "#6366f1",
+  },
+  {
+    from: 2, to: 0,
+    label: "200 OK — protected data",
+    detail: "Resource Server validates the new JWT (RS256 signature, exp, iss, aud) and returns the response. The full silent refresh cycle completes in < 500ms on a healthy network.",
+    color: "#34d399", dashed: true,
+  },
+];
+
+const R_SVG_H = 80 + REFRESH_STEPS.length * DY + 30;
+
+function RefreshFlow() {
+  const [activeStep, setActiveStep] = useState(0);
+  const step = REFRESH_STEPS[activeStep];
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="overflow-x-auto">
+        <svg viewBox={`0 0 620 ${R_SVG_H}`} className="w-full" style={{ minWidth: 420 }}>
+          <defs>
+            {REFRESH_STEPS.map((s, i) => (
+              <marker
+                key={i}
+                id={`ref-a-${i}`}
+                markerWidth="8" markerHeight="6"
+                refX="8" refY="3" orient="auto"
+              >
+                <polygon
+                  points="0 0, 8 3, 0 6"
+                  fill={i === activeStep ? s.color : "#3f3f46"}
+                />
+              </marker>
+            ))}
+          </defs>
+
+          {/* Actors */}
+          {R_ACTORS.map((actor, ai) => {
+            const isActive = step.from === ai || step.to === ai;
+            return (
+              <g key={ai}>
+                <rect
+                  x={actor.x - 52} y={10} width={104} height={42} rx={7}
+                  fill={isActive ? "#1e1b4b" : "#18181b"}
+                  stroke={isActive ? "#6366f1" : "#3f3f46"}
+                  strokeWidth={isActive ? 2 : 1}
+                />
+                <text x={actor.x} y={27} textAnchor="middle"
+                  fill={isActive ? "#e4e4e7" : "#a1a1aa"}
+                  fontSize="10" fontWeight="600" fontFamily="sans-serif">{actor.label}</text>
+                <text x={actor.x} y={42} textAnchor="middle"
+                  fill="#52525b" fontSize="8" fontFamily="sans-serif">{actor.sub}</text>
+                <line
+                  x1={actor.x} y1={52} x2={actor.x} y2={R_SVG_H - 5}
+                  stroke={isActive ? "#2d2d3a" : "#1f1f23"}
+                  strokeWidth="1" strokeDasharray="4,4"
+                />
+              </g>
+            );
+          })}
+
+          {/* Arrows */}
+          {REFRESH_STEPS.map((s, i) => {
+            const isActive = i === activeStep;
+            const fromX = R_ACTORS[s.from].x;
+            const toX   = R_ACTORS[s.to].x;
+            const y     = 80 + i * DY;
+            const right = toX > fromX;
+            const lineEnd = right ? toX - 9 : toX + 9;
+            const midX  = (fromX + toX) / 2;
+            const color = isActive ? s.color : "#3f3f46";
+
+            return (
+              <g key={i} style={{ cursor: "pointer" }}
+                onClick={() => setActiveStep(i)}>
+                <rect x={Math.min(fromX, toX)} y={y - 16}
+                  width={Math.abs(toX - fromX)} height={32} fill="transparent" />
+                <line
+                  x1={fromX} y1={y} x2={lineEnd} y2={y}
+                  stroke={color}
+                  strokeWidth={isActive ? "2" : "1"}
+                  strokeDasharray={s.dashed ? (isActive ? "6,3" : "4,3") : "none"}
+                  markerEnd={`url(#ref-a-${i})`}
+                />
+                <text x={midX} y={y - 5} textAnchor="middle"
+                  fill={color}
+                  fontSize={isActive ? "8.5" : "7.5"}
+                  fontFamily="monospace"
+                  fontWeight={isActive ? "600" : "400"}>
+                  {s.label}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* Step detail */}
+      <div className={`rounded-xl border p-4 flex flex-col gap-2 min-h-[76px] ${
+        step.color === "#ef4444"
+          ? "border-red-900/50 bg-red-950/20"
+          : step.color === "#34d399"
+          ? "border-emerald-900/50 bg-emerald-950/20"
+          : "border-indigo-900/50 bg-indigo-950/20"
+      }`}>
+        <div className="text-xs font-mono font-semibold" style={{ color: step.color }}>
+          Step {activeStep + 1} / {REFRESH_STEPS.length} — {step.label}
+        </div>
+        <p className="text-sm text-zinc-300 leading-relaxed">{step.detail}</p>
+      </div>
+
+      {/* Nav */}
+      <div className="flex items-center gap-3">
+        <button
+          onClick={() => setActiveStep(p => Math.max(0, p - 1))}
+          disabled={activeStep === 0}
+          className="px-3 py-1.5 rounded-lg text-sm text-zinc-400 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 disabled:opacity-30 transition-colors"
+        >← Prev</button>
+        <button
+          onClick={() => setActiveStep(p => Math.min(REFRESH_STEPS.length - 1, p + 1))}
+          disabled={activeStep === REFRESH_STEPS.length - 1}
+          className="px-3 py-1.5 rounded-lg text-sm text-zinc-400 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 disabled:opacity-30 transition-colors"
+        >Next →</button>
+        <button
+          onClick={() => setActiveStep(0)}
+          className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
+        >↺ Reset</button>
+      </div>
+
+      {/* Rotation explainer */}
+      <div className="grid sm:grid-cols-3 gap-3 text-xs">
+        {[
+          {
+            title: "Rotation (RFC 6749)",
+            color: "text-emerald-400",
+            body: "Every successful refresh issues a brand-new refresh token and immediately invalidates the old one. Reuse of a revoked token is treated as theft — all tokens for that user are revoked.",
+          },
+          {
+            title: "Expiry & sliding window",
+            color: "text-amber-400",
+            body: "Refresh tokens have a max lifetime (e.g. 30 days) and an idle timeout (e.g. 7 days of inactivity). Continuous usage resets the idle clock; absolute expiry forces re-authentication.",
+          },
+          {
+            title: "Secure storage",
+            color: "text-rose-400",
+            body: "Never store refresh tokens in localStorage (XSS risk). Server-side apps store them in encrypted sessions. SPAs use short-lived memory and rely on HttpOnly cookies for silent refresh via the Auth Server's SSO session.",
+          },
+        ].map(({ title, color, body }) => (
+          <div key={title} className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-3 flex flex-col gap-1.5">
+            <span className={`font-semibold ${color}`}>{title}</span>
+            <p className="text-zinc-500 leading-relaxed">{body}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const JWT_PARTS = {
   header:  { alg: "RS256", typ: "JWT", kid: "key-2024-01" },
   payload: {
@@ -640,6 +835,20 @@ export function AuthViz() {
           {/* PKCE callout */}
           <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-3 text-xs text-zinc-500 leading-relaxed">
             <span className="text-zinc-400 font-medium">Why PKCE?</span> — The plain Authorization Code flow was vulnerable: a malicious app registered on the same device could receive the code via redirect URI. PKCE (RFC 7636) adds a cryptographic one-time challenge that ties the token exchange to the exact party that started the flow — even if the code is intercepted, it&apos;s useless without the verifier.
+          </div>
+
+          {/* Refresh token flow */}
+          <div className="flex flex-col gap-3 pt-2 border-t border-zinc-800">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-white">Refresh token flow</h3>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 border border-zinc-700 font-mono">
+                when access token expires
+              </span>
+            </div>
+            <p className="text-xs text-zinc-500 leading-relaxed">
+              Access tokens are short-lived (~15 min). When one expires, the client silently exchanges the long-lived refresh token for a new pair — no user interaction required.
+            </p>
+            <RefreshFlow />
           </div>
         </div>
       )}
