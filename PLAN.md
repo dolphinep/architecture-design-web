@@ -114,3 +114,5 @@ Each path shows a horizontal progress indicator and links to each principle in o
 
 For any principle that ends up without a full animation, add a clean SVG diagram
 embedded directly on the detail page — better than text alone.
+
+## Deloyment
