@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { principleRegistry, CATEGORY_META, LEVEL_META, LEVELS } from "@/lib/registry";
+import { authFrameworks } from "@/lib/auth-frameworks";
 import { codeExamples } from "@/lib/code-examples";
 import { highlightCode } from "@/lib/highlight";
 import { CategoryBadge, ComplexityBadge, LevelBadge, PopularityStars } from "@/components/ui/Badge";
@@ -305,6 +306,56 @@ export default async function PrinciplePage({ params }: Props) {
           </div>
         </div>
       </section>
+
+      {/* Auth frameworks */}
+      {p.slug === "authentication" && (
+        <section className="flex flex-col gap-4">
+          <div className="flex items-center gap-2">
+            <h2 className="text-xl font-semibold text-white">Frameworks & libraries</h2>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 border border-zinc-700 font-mono">
+              {authFrameworks.length} covered
+            </span>
+          </div>
+          <p className="text-sm text-zinc-500">
+            You rarely implement auth from scratch — here are the tools teams actually use.
+          </p>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {authFrameworks.map(f => (
+              <Link
+                key={f.slug}
+                href={`/principles/authentication/${f.slug}`}
+                className="group rounded-xl border border-zinc-800 bg-zinc-900/30 p-4 hover:border-zinc-700 hover:bg-zinc-900/60 transition-all flex flex-col gap-2"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-medium text-zinc-100 group-hover:text-white transition-colors text-sm">
+                    {f.name}
+                  </h3>
+                  <div className="flex gap-1 shrink-0">
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                      f.type === "library" ? "bg-violet-500/15 text-violet-400 border-violet-500/20" :
+                      f.type === "saas"    ? "bg-cyan-500/15 text-cyan-400 border-cyan-500/20" :
+                                            "bg-amber-500/15 text-amber-400 border-amber-500/20"
+                    }`}>{f.type}</span>
+                  </div>
+                </div>
+                <p className="text-xs text-zinc-500 leading-snug">{f.tagline}</p>
+                <div className="flex items-center gap-2 mt-auto pt-1">
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                    f.hosting === "self-hosted"
+                      ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/20"
+                      : "bg-rose-500/15 text-rose-400 border-rose-500/20"
+                  }`}>{f.hosting}</span>
+                  <div className="flex gap-0.5 ml-auto">
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <span key={i} className={`text-xs ${i < f.popularity ? "text-amber-400" : "text-zinc-700"}`}>★</span>
+                    ))}
+                  </div>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Related */}
       {related.length > 0 && (

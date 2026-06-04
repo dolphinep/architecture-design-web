@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 
-type Tab = "oauth" | "jwt" | "verify";
+type Tab = "oauth" | "jwt" | "verify" | "better-auth";
 type JwtPart = "header" | "payload" | "signature";
 
 const ACTORS = [
@@ -628,6 +628,281 @@ function TokenVerify() {
   );
 }
 
+// ── Better Auth ───────────────────────────────────────────────────────────────
+
+type ArchMode = "monolith" | "microservice";
+
+const BA_NODE_STYLES: Record<string, { fill: string; stroke: string; label: string; sub: string }> = {
+  client:  { fill: "#18181b", stroke: "#52525b", label: "#d4d4d8", sub: "#71717a" },
+  gateway: { fill: "#1e1b4b", stroke: "#4f46e5", label: "#a5b4fc", sub: "#818cf8" },
+  auth:    { fill: "#431407", stroke: "#c2410c", label: "#fdba74", sub: "#ea580c" },
+  service: { fill: "#1e1b4b", stroke: "#6366f1", label: "#c7d2fe", sub: "#818cf8" },
+  storage: { fill: "#042f2e", stroke: "#0d9488", label: "#5eead4", sub: "#14b8a6" },
+  app:     { fill: "#0f172a", stroke: "#334155", label: "#94a3b8", sub: "#475569" },
+};
+
+const BA_NW = 112, BA_NH = 40;
+
+function baBorderPt(cx: number, cy: number, dir: number) {
+  const c = Math.cos(dir), s = Math.sin(dir);
+  const hw = BA_NW / 2 + 2, hh = BA_NH / 2 + 2;
+  if (Math.abs(c) < 1e-9) return { x: cx, y: cy + hh * Math.sign(s) };
+  if (Math.abs(s) < 1e-9) return { x: cx + hw * Math.sign(c), y: cy };
+  const t = Math.min(hw / Math.abs(c), hh / Math.abs(s));
+  return { x: cx + c * t, y: cy + s * t };
+}
+
+interface BANode { id: string; label: string; sub: string; x: number; y: number; type: string }
+interface BAEdge { from: string; to: string; label?: string; dashed?: boolean }
+
+function BADiagram({ nodes, edges }: { nodes: BANode[]; edges: BAEdge[] }) {
+  const map = Object.fromEntries(nodes.map(n => [n.id, n]));
+  return (
+    <svg viewBox="0 0 640 210" className="w-full" style={{ minWidth: 420 }}>
+      <defs>
+        <marker id="ba-ah" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#52525b" />
+        </marker>
+        <marker id="ba-ah-d" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#3f3f46" />
+        </marker>
+      </defs>
+      {edges.map((e, i) => {
+        const a = map[e.from], b = map[e.to];
+        if (!a || !b) return null;
+        const ang = Math.atan2(b.y - a.y, b.x - a.x);
+        const p1 = baBorderPt(a.x, a.y, ang);
+        const p2 = baBorderPt(b.x, b.y, ang + Math.PI);
+        const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+        const dx = p2.x - p1.x, dy = p2.y - p1.y;
+        const len = Math.sqrt(dx*dx + dy*dy) || 1;
+        const ox = (-dy / len) * 9, oy = (dx / len) * 9;
+        return (
+          <g key={i}>
+            <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
+              stroke={e.dashed ? "#3f3f46" : "#52525b"} strokeWidth={1.5}
+              strokeDasharray={e.dashed ? "5,3" : undefined}
+              markerEnd={e.dashed ? "url(#ba-ah-d)" : "url(#ba-ah)"} />
+            {e.label && (
+              <text x={mx + ox} y={my + oy} textAnchor="middle" dominantBaseline="middle"
+                fill={e.dashed ? "#3f3f46" : "#71717a"} fontSize="7" fontFamily="monospace">
+                {e.label}
+              </text>
+            )}
+          </g>
+        );
+      })}
+      {nodes.map(n => {
+        const s = BA_NODE_STYLES[n.type];
+        return (
+          <g key={n.id}>
+            <rect x={n.x - BA_NW/2} y={n.y - BA_NH/2} width={BA_NW} height={BA_NH} rx={6}
+              fill={s.fill} stroke={s.stroke} strokeWidth={1.5} />
+            <text x={n.x} y={n.y - 5} textAnchor="middle"
+              fill={s.label} fontSize="9" fontWeight="600" fontFamily="sans-serif">{n.label}</text>
+            <text x={n.x} y={n.y + 9} textAnchor="middle"
+              fill={s.sub} fontSize="7.5" fontFamily="sans-serif">{n.sub}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+const MONOLITH_NODES: BANode[] = [
+  { id:"cli",  label:"Browser / App",  sub:"Client",               x:60,  y:105, type:"client"  },
+  { id:"app",  label:"Next.js App",    sub:"Single process",       x:200, y:105, type:"app"     },
+  { id:"ba",   label:"Better Auth",    sub:"/api/auth/*",          x:360, y:55,  type:"auth"    },
+  { id:"api",  label:"App Routes",     sub:"/api/* + pages",       x:360, y:155, type:"service" },
+  { id:"db",   label:"Database",       sub:"Prisma / Drizzle",     x:520, y:105, type:"storage" },
+];
+const MONOLITH_EDGES: BAEdge[] = [
+  { from:"cli", to:"app", label:"HTTP" },
+  { from:"app", to:"ba",  label:"/api/auth/*" },
+  { from:"app", to:"api", label:"/api/* + UI" },
+  { from:"ba",  to:"db",  label:"users / sessions" },
+  { from:"api", to:"db",  label:"app data", dashed:true },
+];
+
+const MICROSERVICE_NODES: BANode[] = [
+  { id:"cli",  label:"Browser / App",  sub:"Client",               x:55,  y:105, type:"client"  },
+  { id:"gw",   label:"API Gateway",    sub:"Entry point",          x:190, y:105, type:"gateway" },
+  { id:"ba",   label:"Better Auth",    sub:"Auth Service",         x:335, y:55,  type:"auth"    },
+  { id:"adb",  label:"Auth Database",  sub:"users / sessions",     x:480, y:55,  type:"storage" },
+  { id:"svc",  label:"App Services",   sub:"Product / Orders …",   x:335, y:155, type:"service" },
+  { id:"sdb",  label:"App Database",   sub:"domain data",          x:480, y:155, type:"storage" },
+];
+const MICROSERVICE_EDGES: BAEdge[] = [
+  { from:"cli", to:"gw",  label:"HTTP" },
+  { from:"gw",  to:"ba",  label:"/auth/*" },
+  { from:"gw",  to:"svc", label:"Bearer token" },
+  { from:"ba",  to:"adb", label:"read/write" },
+  { from:"svc", to:"ba",  label:"validate token", dashed:true },
+  { from:"svc", to:"sdb", label:"read/write" },
+];
+
+function BetterAuthViz() {
+  const [mode, setMode] = useState<ArchMode>("monolith");
+
+  const isMonolith = mode === "monolith";
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Header */}
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-orange-400">better-auth</span>
+          <a href="https://www.better-auth.com" target="_blank" rel="noopener noreferrer"
+            className="text-[10px] px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-500 hover:text-zinc-300 font-mono transition-colors">
+            better-auth.com ↗
+          </a>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-950/40 border border-orange-800/40 text-orange-400 font-mono">
+            TypeScript-first
+          </span>
+        </div>
+        <p className="text-xs text-zinc-400 leading-relaxed max-w-2xl">
+          Better Auth is a self-hosted, framework-agnostic authentication library for TypeScript.
+          Unlike Auth.js (NextAuth), it owns the full auth database schema, supports plugins (2FA, passkeys, organizations, API keys),
+          and works with any ORM via adapters. You run it inside your own app — no third-party auth server needed.
+        </p>
+      </div>
+
+      {/* Architecture toggle */}
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-zinc-500">Where does it live in your architecture?</span>
+          <div className="flex gap-1 bg-zinc-900 rounded-lg p-1">
+            {(["monolith", "microservice"] as ArchMode[]).map(m => (
+              <button key={m} onClick={() => setMode(m)}
+                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                  mode === m ? "bg-zinc-700 text-white" : "text-zinc-500 hover:text-zinc-300"
+                }`}>
+                {m === "monolith" ? "Monolith" : "Microservice"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <BADiagram
+            nodes={isMonolith ? MONOLITH_NODES : MICROSERVICE_NODES}
+            edges={isMonolith ? MONOLITH_EDGES : MICROSERVICE_EDGES}
+          />
+        </div>
+
+        <div className={`rounded-xl border p-4 text-xs leading-relaxed ${
+          isMonolith
+            ? "border-zinc-700 bg-zinc-900/40 text-zinc-400"
+            : "border-indigo-900/40 bg-indigo-950/10 text-zinc-400"
+        }`}>
+          {isMonolith ? (
+            <>
+              <span className="text-zinc-200 font-semibold">Monolith (recommended starting point).</span>{" "}
+              Better Auth runs inside your Next.js / Express / SvelteKit app. A single
+              catch-all route <code className="text-orange-400">/api/auth/[...all]</code> handles all auth
+              endpoints (sign-in, sign-out, OAuth callbacks, session refresh).
+              It shares the same database as your app — just a separate schema. Zero extra infrastructure,
+              instant setup, easy to reason about. Best for startups and single-product apps.
+            </>
+          ) : (
+            <>
+              <span className="text-zinc-200 font-semibold">Microservice (auth as a dedicated service).</span>{" "}
+              Better Auth runs as a standalone service with its own database. The API Gateway routes{" "}
+              <code className="text-indigo-400">/auth/*</code> traffic to it; other services receive a
+              Bearer token and validate it against Better Auth&apos;s{" "}
+              <code className="text-indigo-400">GET /api/auth/get-session</code> endpoint or by
+              verifying the JWT directly. Adds operational overhead but gives you a single,
+              centralized auth surface across many services.
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Comparison */}
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div className={`rounded-xl border p-4 flex flex-col gap-2 ${
+          isMonolith ? "border-emerald-900/50 bg-emerald-950/15" : "border-zinc-800 bg-zinc-900/20 opacity-50"
+        }`}>
+          <h4 className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
+            {isMonolith && <span>✓</span>} Monolith
+          </h4>
+          <ul className="flex flex-col gap-1.5 text-xs text-zinc-400">
+            <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>Zero extra infra — runs in your existing app</li>
+            <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>Single database transaction across auth + app data</li>
+            <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>Simple local dev, easy to debug</li>
+            <li className="flex gap-2"><span className="text-red-500 shrink-0">−</span>Auth scales with the monolith — no independent scaling</li>
+            <li className="flex gap-2"><span className="text-red-500 shrink-0">−</span>Multiple apps can&apos;t share the same auth instance easily</li>
+          </ul>
+        </div>
+        <div className={`rounded-xl border p-4 flex flex-col gap-2 ${
+          !isMonolith ? "border-indigo-900/50 bg-indigo-950/15" : "border-zinc-800 bg-zinc-900/20 opacity-50"
+        }`}>
+          <h4 className="text-xs font-semibold text-indigo-400 flex items-center gap-1.5">
+            {!isMonolith && <span>✓</span>} Microservice
+          </h4>
+          <ul className="flex flex-col gap-1.5 text-xs text-zinc-400">
+            <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>Single sign-on across multiple services</li>
+            <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>Independent scaling and deployment of auth</li>
+            <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>Centralised audit log for all auth events</li>
+            <li className="flex gap-2"><span className="text-red-500 shrink-0">−</span>Network hop on every session validation</li>
+            <li className="flex gap-2"><span className="text-red-500 shrink-0">−</span>Operational overhead: extra service, DB, deployment</li>
+          </ul>
+        </div>
+      </div>
+
+      {/* Setup snippet */}
+      <div className="flex flex-col gap-2">
+        <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Minimal setup (Next.js)</h4>
+        <pre className="text-xs font-mono text-zinc-300 bg-zinc-900/80 border border-zinc-800 rounded-xl p-4 overflow-x-auto leading-relaxed">{`// lib/auth.ts
+import { betterAuth } from "better-auth";
+import { prismaAdapter } from "better-auth/adapters/prisma";
+
+export const auth = betterAuth({
+  database: prismaAdapter(prisma, { provider: "postgresql" }),
+  socialProviders: {
+    github: { clientId: process.env.GITHUB_ID!, clientSecret: process.env.GITHUB_SECRET! },
+    google: { clientId: process.env.GOOGLE_ID!, clientSecret: process.env.GOOGLE_SECRET! },
+  },
+  emailAndPassword: { enabled: true },
+});
+
+// app/api/auth/[...all]/route.ts — single catch-all handler
+import { toNextJsHandler } from "better-auth/next-js";
+export const { GET, POST } = toNextJsHandler(auth);
+
+// middleware.ts — protect routes
+import { betterFetch } from "@better-fetch/fetch";
+export async function middleware(req: NextRequest) {
+  const { data: session } = await betterFetch("/api/auth/get-session", {
+    baseURL: req.nextUrl.origin,
+    headers: { cookie: req.headers.get("cookie") ?? "" },
+  });
+  if (!session) return NextResponse.redirect(new URL("/login", req.url));
+  return NextResponse.next();
+}`}</pre>
+      </div>
+
+      {/* vs alternatives */}
+      <div className="flex flex-col gap-2">
+        <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">vs other solutions</h4>
+        <div className="grid sm:grid-cols-3 gap-2 text-xs">
+          {[
+            { name:"Better Auth", own:"Self-hosted, TS-first, full schema ownership, plugin ecosystem", fit:"Apps that need custom auth logic without a managed service" },
+            { name:"Auth.js / NextAuth", own:"Minimal session store, provider adapters, less opinionated schema", fit:"Quick OAuth setup for Next.js; simpler but less extensible" },
+            { name:"Auth0 / Clerk", own:"Managed SaaS — you call their API, they own user data", fit:"Teams who want zero auth infra; trade control for convenience" },
+          ].map(({ name, own, fit }) => (
+            <div key={name} className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-3 flex flex-col gap-1.5">
+              <span className="font-semibold text-zinc-200">{name}</span>
+              <p className="text-zinc-500">{own}</p>
+              <p className="text-zinc-600 italic">{fit}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function AuthViz() {
   const [tab, setTab]             = useState<Tab>("oauth");
   const [activeStep, setActiveStep] = useState(0);
@@ -657,7 +932,7 @@ export function AuthViz() {
     <div className="flex flex-col gap-4">
       {/* Tabs */}
       <div className="flex gap-1 bg-zinc-900 rounded-lg p-1 w-fit">
-        {(["oauth", "jwt", "verify"] as Tab[]).map((t) => (
+        {(["oauth", "jwt", "verify", "better-auth"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -665,7 +940,7 @@ export function AuthViz() {
               tab === t ? "bg-zinc-700 text-white" : "text-zinc-500 hover:text-zinc-300"
             }`}
           >
-            {t === "oauth" ? "OAuth 2.0 + PKCE Flow" : t === "jwt" ? "JWT Anatomy" : "Token Verification"}
+            {t === "oauth" ? "OAuth 2.0 + PKCE" : t === "jwt" ? "JWT Anatomy" : t === "verify" ? "Token Verification" : "Better Auth"}
           </button>
         ))}
       </div>
@@ -853,8 +1128,9 @@ export function AuthViz() {
         </div>
       )}
 
-      {tab === "jwt"    && <JwtAnatomy />}
-      {tab === "verify" && <TokenVerify />}
+      {tab === "jwt"          && <JwtAnatomy />}
+      {tab === "verify"       && <TokenVerify />}
+      {tab === "better-auth"  && <BetterAuthViz />}
     </div>
   );
 }
