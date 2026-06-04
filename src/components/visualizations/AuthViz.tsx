@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 
-type Tab = "oauth" | "jwt" | "verify" | "better-auth";
+type Tab = "oauth" | "jwt" | "verify" | "better-auth" | "gateway";
 type JwtPart = "header" | "payload" | "signature";
 
 const ACTORS = [
@@ -903,6 +903,328 @@ export async function middleware(req: NextRequest) {
   );
 }
 
+// ── Gateway Auth ──────────────────────────────────────────────────────────────
+
+interface GWStep {
+  id: string;
+  actor: "client" | "gateway" | "service" | "internal";
+  label: string;
+  sublabel: string;
+  detail: string;
+  color: string;
+  arrowFrom?: "client" | "gateway" | "service";
+  arrowTo?: "client" | "gateway" | "service";
+  dashed?: boolean;
+}
+
+const GW_STEPS: GWStep[] = [
+  {
+    id: "request",
+    actor: "client",
+    arrowFrom: "client", arrowTo: "gateway",
+    label: "POST /api/orders  Authorization: Bearer <JWT>",
+    sublabel: "Client sends raw JWT",
+    detail: "The client includes the access token in every request. The raw JWT is visible on the wire between client and gateway — this is intentional; the gateway is the trust boundary.",
+    color: "#818cf8",
+  },
+  {
+    id: "validate",
+    actor: "gateway",
+    label: "Gateway validates token (no upstream call)",
+    sublabel: "Local RS256 verification",
+    detail: "The gateway verifies the JWT entirely locally — it caches the Auth Server's public keys from /jwks.json on startup. It checks: ① RS256 signature, ② exp (not expired), ③ iss (correct issuer), ④ aud (this gateway is the audience), ⑤ required scope. No network hop to the Auth Server on every request.",
+    color: "#f59e0b",
+  },
+  {
+    id: "reject",
+    actor: "gateway",
+    arrowFrom: "gateway", arrowTo: "client",
+    label: "401 Unauthorized (if invalid)",
+    sublabel: "Never reaches services",
+    detail: "If the token is missing, expired, or has an invalid signature, the gateway rejects the request immediately and returns 401. The microservices behind the gateway never see the request — they are shielded from unauthenticated traffic entirely.",
+    color: "#ef4444",
+    dashed: true,
+  },
+  {
+    id: "inject",
+    actor: "gateway",
+    arrowFrom: "gateway", arrowTo: "service",
+    label: "POST /orders  X-User-ID: usr_123  X-User-Role: admin",
+    sublabel: "Headers injected — no Bearer token forwarded",
+    detail: "The gateway strips the Authorization header and injects verified user identity as trusted internal headers. Services receive plain HTTP with no token to parse or verify — they just read X-User-ID and X-User-Role. The gateway also strips any X-User-* headers that came from the client to prevent spoofing.",
+    color: "#6366f1",
+  },
+  {
+    id: "service",
+    actor: "service",
+    label: "Service trusts gateway headers",
+    sublabel: "No JWT validation needed",
+    detail: "The Order Service reads req.headers['x-user-id'] and req.headers['x-user-role'] directly — no JWT library, no JWKS fetch, no crypto. It trusts these headers because they can only arrive from the gateway (enforced by network policy or mTLS — external traffic cannot spoof them).",
+    color: "#34d399",
+  },
+  {
+    id: "response",
+    actor: "service",
+    arrowFrom: "service", arrowTo: "client",
+    label: "200 OK  {data}",
+    sublabel: "Response passes through gateway",
+    detail: "The service responds to the gateway, which optionally transforms, enriches, or rate-limits the response before forwarding it to the client. The round-trip completes without the Auth Server being involved at all — only the initial JWKS fetch was ever needed.",
+    color: "#34d399",
+    dashed: true,
+  },
+];
+
+const GW_ACTORS = [
+  { id: "client",  label: "Client",      sub: "Browser / App",    x: 80  },
+  { id: "gateway", label: "API Gateway", sub: "Auth boundary",     x: 300 },
+  { id: "service", label: "Microservice",sub: "Order / User svc",  x: 530 },
+];
+
+const GW_HEADERS = [
+  { header: "X-User-ID",       value: "usr_01HQKZ",        note: "Stable user identifier from JWT sub claim" },
+  { header: "X-User-Role",     value: "admin",              note: "Role extracted from custom JWT claim" },
+  { header: "X-User-Email",    value: "alice@example.com",  note: "Verified email — service doesn't need to look it up" },
+  { header: "X-Tenant-ID",     value: "org_acme",           note: "Multi-tenant isolation context" },
+  { header: "X-Token-Scopes",  value: "read:orders write:orders", note: "Granted scopes — service enforces fine-grained access" },
+  { header: "X-Request-ID",    value: "req_7f3ab2",         note: "Correlation ID for distributed tracing" },
+];
+
+function GatewayAuthViz() {
+  const [activeStep, setActiveStep] = useState(0);
+  const step = GW_STEPS[activeStep];
+
+  const SVG_W = 620;
+  const Y0 = 90;
+  const arrowSteps = GW_STEPS.filter(s => s.arrowFrom && s.arrowTo);
+  const SVG_H = Y0 + arrowSteps.length * 44 + 30;
+
+  const actorX = (id: string) => GW_ACTORS.find(a => a.id === id)!.x;
+
+  let arrowIdx = -1;
+
+  return (
+    <div className="flex flex-col gap-5">
+
+      {/* Concept banner */}
+      <div className="rounded-xl border border-indigo-900/40 bg-indigo-950/15 p-4 text-xs text-zinc-400 leading-relaxed">
+        <span className="text-indigo-300 font-semibold">Core idea: </span>
+        The API Gateway is the single trust boundary. It validates the JWT once and converts it into
+        simple HTTP headers that services can read without any crypto. Services never see tokens —
+        they see users. This centralises auth logic and keeps microservices thin.
+      </div>
+
+      {/* Step list */}
+      <div className="flex flex-col sm:flex-row gap-4">
+        <div className="flex sm:flex-col gap-1.5 overflow-x-auto sm:overflow-visible shrink-0">
+          {GW_STEPS.map((s, i) => (
+            <button
+              key={s.id}
+              onClick={() => setActiveStep(i)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-left whitespace-nowrap sm:whitespace-normal transition-colors min-w-fit ${
+                i === activeStep
+                  ? "border-indigo-800/60 bg-indigo-950/30 text-indigo-300 font-medium"
+                  : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700"
+              }`}
+            >
+              <span className={`text-xs font-mono w-4 shrink-0 ${i === activeStep ? "" : "text-zinc-700"}`}>{i + 1}</span>
+              <span className="text-xs">{s.sublabel}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Detail card */}
+        <div className={`flex-1 rounded-xl border p-4 flex flex-col gap-2 ${
+          step.color === "#ef4444" ? "border-red-900/50 bg-red-950/15" :
+          step.color === "#34d399" ? "border-emerald-900/50 bg-emerald-950/15" :
+          step.color === "#f59e0b" ? "border-amber-900/50 bg-amber-950/15" :
+          "border-indigo-900/50 bg-indigo-950/15"
+        }`}>
+          <div className="text-xs font-mono font-semibold" style={{ color: step.color }}>
+            Step {activeStep + 1} — {step.label}
+          </div>
+          <p className="text-sm text-zinc-300 leading-relaxed">{step.detail}</p>
+        </div>
+      </div>
+
+      {/* Sequence diagram */}
+      <div className="overflow-x-auto">
+        <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} className="w-full" style={{ minWidth: 460 }}>
+          <defs>
+            {GW_STEPS.filter(s => s.arrowFrom).map((s, i) => (
+              <marker key={i} id={`gw-a-${i}`} markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                <polygon points="0 0, 8 3, 0 6" fill={s.id === GW_STEPS[activeStep]?.id ? s.color : "#3f3f46"} />
+              </marker>
+            ))}
+          </defs>
+
+          {/* Actor boxes */}
+          {GW_ACTORS.map(a => {
+            const isActive = step.arrowFrom === a.id || step.arrowTo === a.id || step.actor === a.id;
+            return (
+              <g key={a.id}>
+                <rect x={a.x - 62} y={10} width={124} height={42} rx={7}
+                  fill={isActive ? "#1e1b4b" : "#18181b"}
+                  stroke={isActive ? "#6366f1" : "#3f3f46"}
+                  strokeWidth={isActive ? 2 : 1} />
+                <text x={a.x} y={27} textAnchor="middle" fill={isActive ? "#e4e4e7" : "#a1a1aa"}
+                  fontSize="10" fontWeight="600" fontFamily="sans-serif">{a.label}</text>
+                <text x={a.x} y={42} textAnchor="middle" fill="#52525b"
+                  fontSize="8" fontFamily="sans-serif">{a.sub}</text>
+                <line x1={a.x} y1={52} x2={a.x} y2={SVG_H - 5}
+                  stroke={isActive ? "#2d2d3a" : "#1f1f23"} strokeWidth="1" strokeDasharray="4,4" />
+              </g>
+            );
+          })}
+
+          {/* Arrows for steps that have from/to */}
+          {GW_STEPS.map((s, si) => {
+            if (!s.arrowFrom || !s.arrowTo) return null;
+            arrowIdx++;
+            const y = Y0 + arrowIdx * 44;
+            const fromX = actorX(s.arrowFrom);
+            const toX = actorX(s.arrowTo);
+            const right = toX > fromX;
+            const lineEnd = right ? toX - 9 : toX + 9;
+            const midX = (fromX + toX) / 2;
+            const isActive = si === activeStep;
+            const color = isActive ? s.color : "#3f3f46";
+            const markerIdx = GW_STEPS.filter((x, xi) => xi <= si && x.arrowFrom).length - 1;
+            return (
+              <g key={s.id} style={{ cursor: "pointer" }} onClick={() => setActiveStep(si)}>
+                <rect x={Math.min(fromX, toX)} y={y - 18} width={Math.abs(toX - fromX)} height={36} fill="transparent" />
+                <line x1={fromX} y1={y} x2={lineEnd} y2={y}
+                  stroke={color} strokeWidth={isActive ? 2 : 1}
+                  strokeDasharray={s.dashed ? (isActive ? "6,3" : "4,3") : "none"}
+                  markerEnd={`url(#gw-a-${markerIdx})`} />
+                <text x={midX} y={y - 5} textAnchor="middle" fill={color}
+                  fontSize={isActive ? "8" : "7"} fontFamily="monospace" fontWeight={isActive ? "600" : "400"}>
+                  {s.label.length > 50 ? s.label.slice(0, 48) + "…" : s.label}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Gateway "validate" annotation */}
+          {activeStep === 1 && (
+            <g>
+              <rect x={actorX("gateway") - 70} y={Y0 - 10} width={140} height={52} rx={6}
+                fill="#451a03" stroke="#d97706" strokeWidth={1.5} strokeDasharray="4,2" />
+              <text x={actorX("gateway")} y={Y0 + 8} textAnchor="middle" fill="#fcd34d"
+                fontSize="8" fontWeight="600" fontFamily="monospace">① verify RS256</text>
+              <text x={actorX("gateway")} y={Y0 + 20} textAnchor="middle" fill="#fcd34d"
+                fontSize="8" fontFamily="monospace">② check exp/iss/aud</text>
+              <text x={actorX("gateway")} y={Y0 + 32} textAnchor="middle" fill="#fcd34d"
+                fontSize="8" fontFamily="monospace">③ extract claims</text>
+            </g>
+          )}
+        </svg>
+      </div>
+
+      {/* Headers injected */}
+      <div className="flex flex-col gap-2">
+        <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">
+          Headers the gateway injects downstream
+        </h4>
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 overflow-hidden">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-zinc-800">
+                <th className="text-left px-4 py-2 text-zinc-500 font-medium">Header</th>
+                <th className="text-left px-4 py-2 text-zinc-500 font-medium">Example value</th>
+                <th className="text-left px-4 py-2 text-zinc-500 font-medium hidden sm:table-cell">Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              {GW_HEADERS.map((h, i) => (
+                <tr key={h.header} className={i < GW_HEADERS.length - 1 ? "border-b border-zinc-800/50" : ""}>
+                  <td className="px-4 py-2.5 font-mono text-indigo-400">{h.header}</td>
+                  <td className="px-4 py-2.5 font-mono text-zinc-400">{h.value}</td>
+                  <td className="px-4 py-2.5 text-zinc-500 hidden sm:table-cell">{h.note}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* vs Per-service */}
+      <div className="flex flex-col gap-2">
+        <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">
+          Gateway auth vs per-service validation
+        </h4>
+        <div className="grid sm:grid-cols-2 gap-3 text-xs">
+          <div className="rounded-xl border border-indigo-900/40 bg-indigo-950/10 p-4 flex flex-col gap-2">
+            <span className="font-semibold text-indigo-300">Gateway validates (centralised)</span>
+            <ul className="flex flex-col gap-1.5 text-zinc-400">
+              <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>Services are thin — no JWT library needed</li>
+              <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>One place to update auth logic or rotate keys</li>
+              <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>Invalid tokens never reach services</li>
+              <li className="flex gap-2"><span className="text-red-500 shrink-0">−</span>Services must trust the network (gateway must be the only entry point)</li>
+              <li className="flex gap-2"><span className="text-red-500 shrink-0">−</span>Gateway becomes a critical path — must be highly available</li>
+            </ul>
+          </div>
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900/20 p-4 flex flex-col gap-2">
+            <span className="font-semibold text-zinc-300">Per-service validation (decentralised)</span>
+            <ul className="flex flex-col gap-1.5 text-zinc-400">
+              <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>Services verify identity themselves — no implicit trust</li>
+              <li className="flex gap-2"><span className="text-emerald-500 shrink-0">+</span>Works for service-to-service calls without a gateway</li>
+              <li className="flex gap-2"><span className="text-red-500 shrink-0">−</span>Every service needs a JWT library and JWKS cache</li>
+              <li className="flex gap-2"><span className="text-red-500 shrink-0">−</span>Auth logic duplicated — key rotation must be coordinated</li>
+              <li className="flex gap-2"><span className="text-red-500 shrink-0">−</span>Invalid tokens may reach service code before being caught</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      {/* Code */}
+      <div className="flex flex-col gap-2">
+        <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Gateway middleware (Node.js / Express)</h4>
+        <pre className="text-xs font-mono text-zinc-300 bg-zinc-900/80 border border-zinc-800 rounded-xl p-4 overflow-x-auto leading-relaxed">{`import { createRemoteJWKSet, jwtVerify } from "jose";
+
+const JWKS = createRemoteJWKSet(new URL("https://auth.example.com/.well-known/jwks.json"));
+
+async function authMiddleware(req, res, next) {
+  const bearer = req.headers.authorization;
+  if (!bearer?.startsWith("Bearer ")) return res.status(401).json({ error: "missing_token" });
+
+  try {
+    const { payload } = await jwtVerify(bearer.slice(7), JWKS, {
+      issuer:   "https://auth.example.com",
+      audience: "https://api.example.com",
+    });
+
+    // Strip incoming X-User-* to prevent spoofing from external clients
+    delete req.headers["x-user-id"];
+    delete req.headers["x-user-role"];
+
+    // Inject verified identity for downstream services
+    req.headers["x-user-id"]     = payload.sub;
+    req.headers["x-user-role"]   = payload.role ?? "user";
+    req.headers["x-user-email"]  = payload.email;
+    req.headers["x-token-scopes"]= payload.scope;
+    req.headers["x-tenant-id"]   = payload.tenant_id;
+
+    // Remove the raw token — services don't need it
+    delete req.headers.authorization;
+
+    next();
+  } catch {
+    res.status(401).json({ error: "invalid_token" });
+  }
+}
+
+// Service reads headers — no JWT library needed
+app.get("/orders", (req, res) => {
+  const userId = req.headers["x-user-id"];    // "usr_01HQKZ"
+  const role   = req.headers["x-user-role"];  // "admin"
+  // ... business logic
+});`}</pre>
+      </div>
+
+    </div>
+  );
+}
+
 export function AuthViz() {
   const [tab, setTab]             = useState<Tab>("oauth");
   const [activeStep, setActiveStep] = useState(0);
@@ -932,15 +1254,19 @@ export function AuthViz() {
     <div className="flex flex-col gap-4">
       {/* Tabs */}
       <div className="flex gap-1 bg-zinc-900 rounded-lg p-1 w-fit">
-        {(["oauth", "jwt", "verify", "better-auth"] as Tab[]).map((t) => (
+        {(["oauth", "jwt", "verify", "gateway", "better-auth"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+            className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors whitespace-nowrap ${
               tab === t ? "bg-zinc-700 text-white" : "text-zinc-500 hover:text-zinc-300"
             }`}
           >
-            {t === "oauth" ? "OAuth 2.0 + PKCE" : t === "jwt" ? "JWT Anatomy" : t === "verify" ? "Token Verification" : "Better Auth"}
+            {t === "oauth" ? "OAuth + PKCE" :
+             t === "jwt"   ? "JWT" :
+             t === "verify"? "Token Verify" :
+             t === "gateway"? "Gateway Auth" :
+             "Better Auth"}
           </button>
         ))}
       </div>
@@ -1130,6 +1456,7 @@ export function AuthViz() {
 
       {tab === "jwt"          && <JwtAnatomy />}
       {tab === "verify"       && <TokenVerify />}
+      {tab === "gateway"      && <GatewayAuthViz />}
       {tab === "better-auth"  && <BetterAuthViz />}
     </div>
   );
