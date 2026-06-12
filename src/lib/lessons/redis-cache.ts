@@ -1,6 +1,8 @@
 import type { Lesson } from "@/types/lesson";
+import { redisCacheLab } from "./redis-cache-lab";
 
 export const redisCacheLesson: Lesson = {
+  lab: redisCacheLab,
   slug: "redis-cache",
   title: "Caching & Redis",
   description:

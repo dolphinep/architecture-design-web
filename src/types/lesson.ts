@@ -41,6 +41,42 @@ export interface LessonSlide {
   animation?: SlideAnimation;
 }
 
+// ─── Hands-on lab ─────────────────────────────────────────────────────────────
+
+export type LabLang = "typescript" | "go" | "python";
+
+export interface LabFile {
+  /** File name shown in the header and used for download, e.g. "docker-compose.yml" */
+  path: string;
+  /** Shiki language id: yaml, typescript, go, python, bash, … */
+  lang: string;
+  content: string;
+}
+
+export interface LabStepContent {
+  files?: LabFile[];
+  commands?: string[];
+  /** Expected terminal output, shown dimmed */
+  output?: string;
+}
+
+export interface LabStep {
+  id: string;
+  title: string;
+  /** Supports inline markup: **bold** and `code` */
+  description: string;
+  /** Content shown regardless of selected language track */
+  shared?: LabStepContent;
+  /** Content per language track */
+  perLang?: Partial<Record<LabLang, LabStepContent>>;
+}
+
+export interface LessonLab {
+  intro: string;
+  prerequisites: string[];
+  steps: LabStep[];
+}
+
 export interface Lesson {
   slug: string;
   title: string;
@@ -50,4 +86,6 @@ export interface Lesson {
   level: "beginner" | "intermediate" | "advanced";
   tags: string[];
   slides: LessonSlide[];
+  /** Optional hands-on lab with Docker setup and runnable code */
+  lab?: LessonLab;
 }

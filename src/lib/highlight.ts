@@ -16,3 +16,14 @@ export async function highlightCode(code: string, language: CodeLanguage): Promi
     },
   });
 }
+
+/** Generic variant for lab files — accepts any shiki language id (yaml, python, bash, …) */
+export async function highlightSnippet(code: string, lang: string): Promise<string> {
+  return codeToHtml(code, {
+    lang,
+    theme: "one-dark-pro",
+    colorReplacements: {
+      "#282c34": "transparent",
+    },
+  });
+}

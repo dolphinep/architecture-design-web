@@ -46,6 +46,12 @@ export default function LearningPage() {
               <span>{lesson.slides.length} slides</span>
               <span>·</span>
               <span>{lesson.duration}</span>
+              {lesson.lab && (
+                <>
+                  <span>·</span>
+                  <span className="text-emerald-500">⚒ hands-on lab</span>
+                </>
+              )}
               <span className="ml-auto text-violet-400 group-hover:text-violet-300 transition-colors">
                 Start →
               </span>

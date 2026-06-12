@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { lessons, getLesson } from "@/lib/lessons";
+import { prepareLabHtml } from "@/lib/lab-highlight";
 import { SlidePlayer } from "@/components/learning/SlidePlayer";
 
 export async function generateStaticParams() {
@@ -30,5 +31,7 @@ export default async function LessonPage({
   const lesson = getLesson(slug);
   if (!lesson) notFound();
 
-  return <SlidePlayer lesson={lesson} />;
+  const labHtml = lesson.lab ? await prepareLabHtml(lesson.lab) : {};
+
+  return <SlidePlayer lesson={lesson} labHtml={labHtml} />;
 }
