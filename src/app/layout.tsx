@@ -17,6 +17,7 @@ const NAV = [
   { href: "/principles?category=infrastructure", label: "Infrastructure" },
   { href: "/principles?category=cloud", label: "Cloud" },
   { href: "/principles?category=networking", label: "Networking" },
+  { href: "/learning", label: "Learning" },
   { href: "/canvas", label: "Canvas" },
 ];
 
