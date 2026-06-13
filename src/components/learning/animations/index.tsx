@@ -13,6 +13,14 @@ import { RedisStructuresViz } from "./RedisStructuresViz";
 import { CacheOptionsViz } from "./CacheOptionsViz";
 import { EventLoopViz } from "./EventLoopViz";
 import { PersistenceViz } from "./PersistenceViz";
+import { SyncCouplingViz } from "./SyncCouplingViz";
+import { QueueBufferViz } from "./QueueBufferViz";
+import { QueuePubSubViz } from "./QueuePubSubViz";
+import { DeliveryViz } from "./DeliveryViz";
+import { KafkaLogViz } from "./KafkaLogViz";
+import { KafkaPartitionsViz } from "./KafkaPartitionsViz";
+import { ConsumerGroupsViz } from "./ConsumerGroupsViz";
+import { KafkaInternalsViz } from "./KafkaInternalsViz";
 
 export function SlideAnimationView({ animation }: { animation: SlideAnimation }): JSX.Element | null {
   const view = renderAnimation(animation);
@@ -33,6 +41,14 @@ function renderAnimation(animation: SlideAnimation): JSX.Element | null {
     case "cache-options":    return <CacheOptionsViz />;
     case "event-loop":       return <EventLoopViz />;
     case "persistence":      return <PersistenceViz />;
+    case "sync-coupling":      return <SyncCouplingViz />;
+    case "queue-buffer":       return <QueueBufferViz />;
+    case "queue-vs-pubsub":    return <QueuePubSubViz />;
+    case "delivery-guarantees": return <DeliveryViz />;
+    case "kafka-log":          return <KafkaLogViz />;
+    case "kafka-partitions":   return <KafkaPartitionsViz />;
+    case "consumer-groups":    return <ConsumerGroupsViz />;
+    case "kafka-internals":    return <KafkaInternalsViz />;
     default:                 return null;
   }
 }

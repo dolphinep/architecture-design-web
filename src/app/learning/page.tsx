@@ -62,7 +62,7 @@ export default function LearningPage() {
         {/* Coming soon placeholder */}
         <div className="rounded-xl border border-dashed border-zinc-800/60 p-6 flex flex-col items-center justify-center gap-2 text-center min-h-[140px]">
           <p className="text-sm text-zinc-600">More lessons coming</p>
-          <p className="text-xs text-zinc-700">Load balancing · Message queues · Database indexing</p>
+          <p className="text-xs text-zinc-700">Load balancing · Database indexing · WebSockets</p>
         </div>
       </div>
     </div>

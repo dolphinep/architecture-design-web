@@ -10,7 +10,15 @@ export type SlideAnimation =
   | "redis-structures"
   | "cache-options"
   | "event-loop"
-  | "persistence";
+  | "persistence"
+  | "sync-coupling"
+  | "queue-buffer"
+  | "queue-vs-pubsub"
+  | "delivery-guarantees"
+  | "kafka-log"
+  | "kafka-partitions"
+  | "consumer-groups"
+  | "kafka-internals";
 
 export type Accent = "violet" | "emerald" | "cyan" | "amber" | "red" | "zinc";
 
