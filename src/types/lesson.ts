@@ -18,7 +18,10 @@ export type SlideAnimation =
   | "kafka-log"
   | "kafka-partitions"
   | "consumer-groups"
-  | "kafka-internals";
+  | "kafka-internals"
+  | "rag-pipeline"
+  | "vector-search"
+  | "llm-inference";
 
 export type Accent = "violet" | "emerald" | "cyan" | "amber" | "red" | "zinc";
 
@@ -112,4 +115,8 @@ export interface Lesson {
   series?: string;
   /** Position within the series — lower numbers come first */
   seriesOrder?: number;
+  /** Top-level module (e.g. "AI Architecture"). Modules get a featured banner section above all other lessons. */
+  module?: string;
+  /** Position within the module */
+  moduleOrder?: number;
 }

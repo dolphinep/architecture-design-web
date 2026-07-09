@@ -3,8 +3,11 @@ import { redisCacheLesson } from "./redis-cache";
 import { messageQueueLesson } from "./message-queue";
 import { oauthLesson } from "./auth-oauth2";
 import { oidcLesson } from "./auth-oidc";
+import { ragLesson } from "./ai-rag";
+import { aiInfraLesson } from "./ai-infra";
+import { openWebUILesson } from "./ai-open-webui";
 
-export const lessons: Lesson[] = [redisCacheLesson, messageQueueLesson, oauthLesson, oidcLesson];
+export const lessons: Lesson[] = [redisCacheLesson, messageQueueLesson, oauthLesson, oidcLesson, ragLesson, aiInfraLesson, openWebUILesson];
 
 export function getLesson(slug: string): Lesson | undefined {
   return lessons.find((l) => l.slug === slug);

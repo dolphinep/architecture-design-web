@@ -21,6 +21,9 @@ import { KafkaLogViz } from "./KafkaLogViz";
 import { KafkaPartitionsViz } from "./KafkaPartitionsViz";
 import { ConsumerGroupsViz } from "./ConsumerGroupsViz";
 import { KafkaInternalsViz } from "./KafkaInternalsViz";
+import { RAGPipelineViz } from "./RAGPipelineViz";
+import { VectorSearchViz } from "./VectorSearchViz";
+import { LLMInferenceViz } from "./LLMInferenceViz";
 
 export function SlideAnimationView({ animation }: { animation: SlideAnimation }): JSX.Element | null {
   const view = renderAnimation(animation);
@@ -49,6 +52,9 @@ function renderAnimation(animation: SlideAnimation): JSX.Element | null {
     case "kafka-partitions":   return <KafkaPartitionsViz />;
     case "consumer-groups":    return <ConsumerGroupsViz />;
     case "kafka-internals":    return <KafkaInternalsViz />;
+    case "rag-pipeline":       return <RAGPipelineViz />;
+    case "vector-search":      return <VectorSearchViz />;
+    case "llm-inference":      return <LLMInferenceViz />;
     default:                 return null;
   }
 }
