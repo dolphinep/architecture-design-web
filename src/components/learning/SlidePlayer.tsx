@@ -161,20 +161,30 @@ export function SlidePlayer({
           </button>
 
           {/* Dots */}
-          <div className="flex gap-1.5">
+          <div className="flex items-center gap-1">
             {lesson.slides.map((s, i) => (
               <button
                 key={s.id}
                 onClick={() => goTo(i)}
                 title={s.title}
-                className={`w-2 h-2 rounded-full transition-all ${
-                  i === index
-                    ? "bg-violet-500 scale-125"
-                    : i < index
-                      ? "bg-zinc-600 hover:bg-zinc-500"
-                      : "bg-zinc-800 hover:bg-zinc-700"
-                }`}
-              />
+                aria-label={`Go to slide ${i + 1}: ${s.title}`}
+                className={`group relative flex items-center justify-center w-6 h-6 rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500`}
+              >
+                {/* visible dot */}
+                <span
+                  className={`block rounded-full transition-all duration-150 ${
+                    i === index
+                      ? "w-2.5 h-2.5 bg-violet-500"
+                      : i < index
+                        ? "w-2 h-2 bg-zinc-500 group-hover:bg-zinc-300"
+                        : "w-2 h-2 bg-zinc-700 group-hover:bg-zinc-500"
+                  }`}
+                />
+                {/* tooltip */}
+                <span className="pointer-events-none absolute bottom-full mb-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300 font-mono opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-10 shadow-lg">
+                  {i + 1}. {s.title}
+                </span>
+              </button>
             ))}
           </div>
 

@@ -2,6 +2,7 @@
 
 import type { JSX } from "react";
 import type { SlideBlock, Accent } from "@/types/lesson";
+import { SequenceDiagram } from "./SequenceDiagram";
 
 const ACCENT: Record<Accent, { text: string; border: string; bg: string; chip: string }> = {
   violet:  { text: "text-violet-400",  border: "border-violet-500/25",  bg: "bg-violet-500/5",  chip: "bg-violet-500/15 text-violet-300 border-violet-500/25" },
@@ -146,6 +147,16 @@ export function SlideContent({ blocks }: { blocks: SlideBlock[] }): JSX.Element 
                   </li>
                 ))}
               </ol>
+            );
+
+          case "sequence":
+            return (
+              <SequenceDiagram
+                key={bi}
+                title={block.title}
+                actors={block.actors}
+                steps={block.steps}
+              />
             );
         }
       })}

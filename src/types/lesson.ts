@@ -37,7 +37,19 @@ export type SlideBlock =
       kind: "compare";
       cards: Array<{ title: string; accent: Accent; points: string[] }>;
     }
-  | { kind: "flow"; steps: string[] };
+  | { kind: "flow"; steps: string[] }
+  | { kind: "sequence"; title?: string; actors: string[]; steps: SequenceStep[] };
+
+export interface SequenceStep {
+  from: string;
+  to: string;
+  /** Short label shown above the arrow — keep under ~32 chars */
+  label: string;
+  /** Optional secondary annotation below the arrow */
+  note?: string;
+  /** "response" renders a dashed arrow; default is solid */
+  style?: "request" | "response";
+}
 
 export interface LessonSlide {
   id: string;
@@ -96,4 +108,8 @@ export interface Lesson {
   slides: LessonSlide[];
   /** Optional hands-on lab with Docker setup and runnable code */
   lab?: LessonLab;
+  /** Group related lessons (e.g. "Authentication"). Lessons in the same series appear together on the listing page. */
+  series?: string;
+  /** Position within the series — lower numbers come first */
+  seriesOrder?: number;
 }

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import type { Lesson } from "@/types/lesson";
 import { lessons } from "@/lib/lessons";
 
 export const metadata: Metadata = {
@@ -9,61 +10,118 @@ export const metadata: Metadata = {
 };
 
 const LEVEL_COLOR: Record<string, string> = {
-  beginner: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
+  beginner:     "text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
   intermediate: "text-amber-400 border-amber-500/30 bg-amber-500/10",
-  advanced: "text-red-400 border-red-500/30 bg-red-500/10",
+  advanced:     "text-red-400 border-red-500/30 bg-red-500/10",
 };
 
+function LessonCard({ lesson, seriesLabel }: { lesson: Lesson; seriesLabel?: string }) {
+  return (
+    <Link
+      href={`/learning/${lesson.slug}`}
+      className="group rounded-xl border border-zinc-800 bg-zinc-900/30 p-6 hover:border-zinc-700 hover:bg-zinc-900/60 transition-all flex flex-col gap-3"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          {seriesLabel && (
+            <p className="font-mono text-[9px] text-violet-400/70 uppercase tracking-widest mb-1">
+              {seriesLabel}
+            </p>
+          )}
+          <h2 className="font-semibold text-lg text-zinc-100 group-hover:text-white transition-colors leading-snug">
+            {lesson.title}
+          </h2>
+        </div>
+        <span className={`shrink-0 text-[10px] px-2 py-0.5 rounded-full border mt-0.5 ${LEVEL_COLOR[lesson.level]}`}>
+          {lesson.level}
+        </span>
+      </div>
+      <p className="text-sm text-zinc-500 leading-relaxed">{lesson.description}</p>
+      <div className="flex items-center gap-3 mt-auto pt-2 text-xs text-zinc-600 font-mono">
+        <span>{lesson.slides.length} slides</span>
+        <span>·</span>
+        <span>{lesson.duration}</span>
+        {lesson.lab && (
+          <>
+            <span>·</span>
+            <span className="text-emerald-500">⚒ lab</span>
+          </>
+        )}
+        <span className="ml-auto text-violet-400 group-hover:text-violet-300 transition-colors">
+          Start →
+        </span>
+      </div>
+    </Link>
+  );
+}
+
 export default function LearningPage() {
+  // Split into series groups and standalone lessons
+  const seriesMap = new Map<string, Lesson[]>();
+  const standalone: Lesson[] = [];
+
+  for (const lesson of lessons) {
+    if (lesson.series) {
+      const arr = seriesMap.get(lesson.series) ?? [];
+      arr.push(lesson);
+      seriesMap.set(lesson.series, arr);
+    } else {
+      standalone.push(lesson);
+    }
+  }
+
+  // Sort within each series by seriesOrder
+  for (const [, arr] of seriesMap) {
+    arr.sort((a, b) => (a.seriesOrder ?? 99) - (b.seriesOrder ?? 99));
+  }
+
   return (
     <div className="max-w-4xl mx-auto px-4 py-12 flex flex-col gap-10">
       <header className="flex flex-col gap-3">
         <h1 className="text-3xl font-bold text-white">Learning</h1>
         <p className="text-zinc-400 max-w-2xl">
-          Short slideshow lessons with animated visualizations. Each slide animates one idea —
-          or hit <span className="font-mono text-zinc-300 text-sm">Recap</span> for the whole
-          lesson in 30 seconds.
+          Short slideshow lessons with animated visualizations and sequence diagrams. Each slide
+          explains one idea — or hit{" "}
+          <span className="font-mono text-zinc-300 text-sm">Recap</span> for the whole lesson
+          in 30 seconds.
         </p>
       </header>
 
-      <div className="grid sm:grid-cols-2 gap-4">
-        {lessons.map((lesson) => (
-          <Link
-            key={lesson.slug}
-            href={`/learning/${lesson.slug}`}
-            className="group rounded-xl border border-zinc-800 bg-zinc-900/30 p-6 hover:border-zinc-700 hover:bg-zinc-900/60 transition-all flex flex-col gap-3"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="font-semibold text-lg text-zinc-100 group-hover:text-white transition-colors">
-                {lesson.title}
-              </h2>
-              <span className={`shrink-0 text-[10px] px-2 py-0.5 rounded-full border ${LEVEL_COLOR[lesson.level]}`}>
-                {lesson.level}
-              </span>
-            </div>
-            <p className="text-sm text-zinc-500 leading-relaxed">{lesson.description}</p>
-            <div className="flex items-center gap-3 mt-auto pt-2 text-xs text-zinc-600 font-mono">
-              <span>{lesson.slides.length} slides</span>
-              <span>·</span>
-              <span>{lesson.duration}</span>
-              {lesson.lab && (
-                <>
-                  <span>·</span>
-                  <span className="text-emerald-500">⚒ hands-on lab</span>
-                </>
-              )}
-              <span className="ml-auto text-violet-400 group-hover:text-violet-300 transition-colors">
-                Start →
-              </span>
-            </div>
-          </Link>
-        ))}
-
-        {/* Coming soon placeholder */}
-        <div className="rounded-xl border border-dashed border-zinc-800/60 p-6 flex flex-col items-center justify-center gap-2 text-center min-h-[140px]">
-          <p className="text-sm text-zinc-600">More lessons coming</p>
-          <p className="text-xs text-zinc-700">Load balancing · Database indexing · WebSockets</p>
+      {/* Standalone lessons */}
+      {standalone.length > 0 && (
+        <div className="grid sm:grid-cols-2 gap-4">
+          {standalone.map((lesson) => (
+            <LessonCard key={lesson.slug} lesson={lesson} />
+          ))}
         </div>
+      )}
+
+      {/* Series groups */}
+      {Array.from(seriesMap.entries()).map(([seriesName, group]) => (
+        <section key={seriesName} className="flex flex-col gap-4">
+          <div className="flex items-center gap-3">
+            <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-widest font-mono">
+              {seriesName}
+            </h2>
+            <div className="flex-1 h-px bg-zinc-800" />
+            <span className="font-mono text-[10px] text-zinc-600">{group.length} lessons</span>
+          </div>
+          <div className="grid sm:grid-cols-2 gap-4">
+            {group.map((lesson, i) => (
+              <LessonCard
+                key={lesson.slug}
+                lesson={lesson}
+                seriesLabel={`Part ${i + 1} of ${group.length}`}
+              />
+            ))}
+          </div>
+        </section>
+      ))}
+
+      {/* Coming soon */}
+      <div className="rounded-xl border border-dashed border-zinc-800/60 p-6 flex flex-col items-center justify-center gap-2 text-center min-h-[100px]">
+        <p className="text-sm text-zinc-600">More lessons coming</p>
+        <p className="text-xs text-zinc-700">Load balancing · Database indexing · WebSockets</p>
       </div>
     </div>
   );
