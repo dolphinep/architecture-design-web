@@ -19,6 +19,7 @@ const NAV = [
   { href: "/principles?category=networking", label: "Networking" },
   { href: "/learning", label: "Learning" },
   { href: "/canvas", label: "Canvas" },
+  { href: "/db-diagram", label: "DB Diagram" },
 ];
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
