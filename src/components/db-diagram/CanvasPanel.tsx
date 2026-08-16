@@ -32,6 +32,7 @@ export default function CanvasPanel({
   const [pan, setPan] = useState({ x: 40, y: 40 });
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
 
   // Smooth 60fps local table dragging state
   const [localPositions, setLocalPositions] = useState<Record<string, { x: number; y: number }>>(positions);
@@ -69,13 +70,15 @@ export default function CanvasPanel({
     }));
   };
 
-  // Keyboard listener for Delete / Backspace
+  // Keyboard shortcut listener (Spacebar for Hand Tool, Delete/Backspace for Delete)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const activeTag = document.activeElement?.tagName.toLowerCase();
       if (activeTag === 'input' || activeTag === 'textarea') return;
 
-      if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (e.code === 'Space' && !isSpacePressed) {
+        setIsSpacePressed(true);
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedTableId && onDeleteTable) {
           onDeleteTable(selectedTableId);
           setSelectedTableId(null);
@@ -89,9 +92,63 @@ export default function CanvasPanel({
       }
     };
 
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        setIsSpacePressed(false);
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedTableId, selectedRelId, onDeleteTable, onDeleteRelationship, schema.relationships]);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [selectedTableId, selectedRelId, onDeleteTable, onDeleteRelationship, schema.relationships, isSpacePressed]);
+
+  // Touchpad 2-finger scroll/pan & Ctrl/Cmd/Pinch Wheel Zoom listener
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+
+      const rect = container.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const cursorY = e.clientY - rect.top;
+
+      if (e.ctrlKey || e.metaKey) {
+        // Touchpad pinch-to-zoom or Ctrl/Cmd + Scroll Wheel (zoom centered at cursor)
+        const zoomFactor = e.deltaY < 0 ? 1.08 : 0.92;
+        setZoom(prevZoom => {
+          const nextZoom = Math.min(Math.max(prevZoom * zoomFactor, 0.2), 3.0);
+          setPan(prevPan => ({
+            x: cursorX - (cursorX - prevPan.x) * (nextZoom / prevZoom),
+            y: cursorY - (cursorY - prevPan.y) * (nextZoom / prevZoom),
+          }));
+          return nextZoom;
+        });
+      } else if (e.shiftKey) {
+        // Shift + Wheel = Horizontal Pan
+        setPan(prev => ({
+          x: prev.x - (e.deltaY || e.deltaX),
+          y: prev.y,
+        }));
+      } else {
+        // 2-Finger Touchpad drag / Mouse wheel vertical & horizontal pan
+        setPan(prev => ({
+          x: prev.x - e.deltaX,
+          y: prev.y - e.deltaY,
+        }));
+      }
+    };
+
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      container.removeEventListener('wheel', handleWheel);
+    };
+  }, []);
 
   // Initialize missing table positions in a grid layout
   useEffect(() => {
@@ -119,7 +176,13 @@ export default function CanvasPanel({
 
   // Handle Canvas Mouse Events
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (e.target === containerRef.current || (e.target as HTMLElement).tagName === 'svg') {
+    // Pan if clicking background OR holding Spacebar OR middle click (e.button === 1)
+    if (
+      isSpacePressed ||
+      e.button === 1 ||
+      e.target === containerRef.current ||
+      (e.target as HTMLElement).tagName === 'svg'
+    ) {
       setIsPanning(true);
       setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
       setSelectedTableId(null);
@@ -152,7 +215,6 @@ export default function CanvasPanel({
 
   const handleMouseUp = () => {
     if (draggingTableId) {
-      // Commit position change to parent / storage ONCE when table drag finishes
       onPositionChange(localPositions);
       setDraggingTableId(null);
     }
@@ -165,6 +227,14 @@ export default function CanvasPanel({
   // Table Drag Start & Select
   const handleTableMouseDown = (tableName: string, e: React.MouseEvent) => {
     e.stopPropagation();
+
+    // If spacebar is held or middle click, trigger background pan instead of table drag
+    if (isSpacePressed || e.button === 1) {
+      setIsPanning(true);
+      setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+      return;
+    }
+
     setSelectedTableId(tableName);
     setSelectedRelId(null);
 
@@ -214,10 +284,8 @@ export default function CanvasPanel({
     if (connectingStart && connectingStart.tableName !== targetTable) {
       const relType = connectingStart.existingRel ? connectingStart.existingRel.relationType : 'one-to-many';
       if (connectingStart.existingRel && onAddOrUpdateRelationship) {
-        // If re-dragging an existing line, update it directly
         onAddOrUpdateRelationship(connectingStart.tableName, connectingStart.colName, targetTable, targetCol, relType);
       } else {
-        // Open modal to choose relation type for new connection
         setPendingRelation({
           fromTable: connectingStart.tableName,
           fromCol: connectingStart.colName,
@@ -315,6 +383,13 @@ export default function CanvasPanel({
     <div className="relative flex-1 h-full bg-zinc-950 overflow-hidden select-none">
       {/* Floating Toolbar Controls */}
       <div className="absolute top-4 right-4 z-40 flex items-center gap-1.5 bg-zinc-900/90 backdrop-blur border border-zinc-800 p-1.5 rounded-lg shadow-xl text-xs text-zinc-300">
+        {/* Hand Tool Indicator when Spacebar is held */}
+        {isSpacePressed && (
+          <span className="px-2 py-0.5 bg-amber-950 text-amber-300 border border-amber-800/80 rounded font-mono text-[10px] flex items-center gap-1">
+            ✋ Hand Tool
+          </span>
+        )}
+
         <button
           onClick={() => setShowFloatingTips(!showFloatingTips)}
           className={`px-2.5 py-1 rounded flex items-center gap-1 text-[11px] font-medium transition-colors ${
@@ -368,7 +443,7 @@ export default function CanvasPanel({
         <div className="absolute top-16 right-4 z-40 w-80 bg-zinc-900/95 backdrop-blur-md border border-zinc-800 rounded-xl p-4 shadow-2xl text-xs text-zinc-300 animate-slide-in space-y-3 font-sans max-h-[calc(100vh-10rem)] overflow-y-auto">
           <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
             <span className="font-semibold text-white flex items-center gap-1.5">
-              <span className="text-amber-400">💡</span> Canvas Actions & Shortcuts
+              <span className="text-amber-400">💡</span> Touchpad & Mouse Navigation
             </span>
             <button onClick={() => setShowFloatingTips(false)} className="text-zinc-500 hover:text-white">
               ✕
@@ -377,12 +452,13 @@ export default function CanvasPanel({
 
           <div className="space-y-2.5 font-mono text-[11px]">
             <div className="p-2 bg-zinc-950/80 border border-zinc-800 rounded-lg">
-              <div className="text-violet-400 font-semibold mb-1 text-[11px] font-sans">Visual Relationship Actions:</div>
+              <div className="text-violet-400 font-semibold mb-1 text-[11px] font-sans">Pan & Zoom Controls:</div>
               <div className="text-zinc-400 font-sans text-[11px] space-y-1">
-                <div>&bull; <span className="text-white font-medium">Click & drag line or badge</span> to re-route relationship line.</div>
-                <div>&bull; <span className="text-white font-medium">Click + handle on column</span> to draw a relationship line.</div>
-                <div>&bull; <span className="text-white font-medium">Click 1:N / 1:1 badge</span> to change cardinality or delete line.</div>
-                <div>&bull; <span className="text-white font-medium">Press Del / Backspace</span> to delete selected table or line.</div>
+                <div>&bull; <span className="text-white font-medium">Touchpad 2-Finger Drag</span>: Pan canvas smoothly</div>
+                <div>&bull; <span className="text-white font-medium">Touchpad Pinch / Ctrl+Scroll</span>: Zoom in/out at cursor</div>
+                <div>&bull; <span className="text-white font-medium">Space + Click & Drag</span>: Hand Tool Pan background</div>
+                <div>&bull; <span className="text-white font-medium">Middle Mouse Button</span>: Drag background anywhere</div>
+                <div>&bull; <span className="text-white font-medium">Shift + Scroll</span>: Pan horizontally</div>
               </div>
             </div>
           </div>
@@ -443,7 +519,7 @@ export default function CanvasPanel({
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        className={`w-full h-full cursor-${isPanning ? 'grabbing' : 'grab'} bg-[radial-gradient(#27272a_1px,transparent_1px)] [background-size:16px_16px]`}
+        className={`w-full h-full cursor-${isSpacePressed ? (isPanning ? 'grabbing' : 'grab') : isPanning ? 'grabbing' : 'grab'} bg-[radial-gradient(#27272a_1px,transparent_1px)] [background-size:16px_16px]`}
       >
         <div
           ref={canvasRef}
