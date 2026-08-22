@@ -1,6 +1,7 @@
 "use client";
 
 import type { JSX } from "react";
+import Link from "next/link";
 import type { SlideBlock, Accent } from "@/types/lesson";
 import { SequenceDiagram } from "./SequenceDiagram";
 
@@ -13,12 +14,25 @@ const ACCENT: Record<Accent, { text: string; border: string; bg: string; chip: s
   zinc:    { text: "text-zinc-400",    border: "border-zinc-700",       bg: "bg-zinc-900/40",   chip: "bg-zinc-800 text-zinc-300 border-zinc-700" },
 };
 
-/** Renders **bold** as bright text and `code` as a mono chip */
+/** Renders **bold** as bright text, `code` as a mono chip, and [label](/href) as a link */
 function Inline({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g);
   return (
     <>
       {parts.map((part, i) => {
+        const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(part);
+        if (link) {
+          const [, label, href] = link;
+          return (
+            <Link
+              key={i}
+              href={href}
+              className="text-violet-400 underline decoration-violet-500/40 underline-offset-2 hover:text-violet-300 hover:decoration-violet-400 transition-colors"
+            >
+              {label}
+            </Link>
+          );
+        }
         if (part.startsWith("**") && part.endsWith("**")) {
           return (
             <strong key={i} className="font-semibold text-zinc-100">

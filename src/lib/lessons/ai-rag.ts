@@ -17,7 +17,7 @@ export const ragLesson: Lesson = {
       body: [
         {
           kind: "text",
-          text: "LLMs are trained on a static snapshot of the world. Ask GPT-4 about your internal docs, last quarter's sales, or a bug filed yesterday — it cannot know. And when it doesn't know, it **hallucinates**.",
+          text: "LLMs are trained on a static snapshot of the world. Ask any frontier model about your internal docs, last quarter's sales, or a bug filed yesterday — it cannot know. And when it doesn't know, it **hallucinates**.",
         },
         {
           kind: "points",

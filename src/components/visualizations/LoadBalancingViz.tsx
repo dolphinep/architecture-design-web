@@ -1,293 +1,344 @@
 "use client";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
+import {
+  VizFrame, VizStage, VizHint, VizControls, VizButton, VizSpacer,
+  VizStats, VizLegend, VizLog,
+  VizSvg, VizText, VizEdge, VizPacket, VizNode,
+  useFlights, useInterval, useOnScreen, useReducedMotion, useEventLog,
+  fadeOut, easeInOut,
+  HUE, TYPE, MOTION, type HueName, type Flight,
+} from "./_shared";
 
 type Algorithm = "round-robin" | "least-connections" | "weighted";
-type ServerStatus = "healthy" | "unhealthy";
 
-interface Server {
+interface ServerState {
   id: string;
   label: string;
-  status: ServerStatus;
-  activeConns: number;
-  totalReqs: number;
+  healthy: boolean;
+  active: number;
+  total: number;
+  /** Relative capacity, used by the weighted algorithm */
   weight: number;
-  latency: number;
+  /** Simulated service time, ms */
+  serviceMs: number;
+  hue: HueName;
 }
 
-interface Packet {
-  id: number;
-  serverId: string;
-  progress: number;
-  returning: boolean;
-  color: string;
-}
-
-const INITIAL_SERVERS: Server[] = [
-  { id: "s1", label: "Server 1", status: "healthy", activeConns: 0, totalReqs: 0, weight: 3, latency: 40 },
-  { id: "s2", label: "Server 2", status: "healthy", activeConns: 0, totalReqs: 0, weight: 2, latency: 80 },
-  { id: "s3", label: "Server 3", status: "healthy", activeConns: 0, totalReqs: 0, weight: 1, latency: 150 },
+const INITIAL: ServerState[] = [
+  { id: "s1", label: "Server 1", healthy: true, active: 0, total: 0, weight: 3, serviceMs: 320, hue: "info" },
+  { id: "s2", label: "Server 2", healthy: true, active: 0, total: 0, weight: 2, serviceMs: 620, hue: "primary" },
+  { id: "s3", label: "Server 3", healthy: true, active: 0, total: 0, weight: 1, serviceMs: 1100, hue: "success" },
 ];
 
-const SERVER_COLORS = ["#6366f1", "#7c3aed", "#0891b2"];
+const ALGORITHMS: Array<{ value: Algorithm; label: string; desc: string }> = [
+  { value: "round-robin",       label: "Round robin",       desc: "equal turns, ignores load" },
+  { value: "least-connections", label: "Least connections", desc: "fewest in-flight wins" },
+  { value: "weighted",          label: "Weighted",          desc: "share by capacity" },
+];
 
-// ─── Algorithm implementations ────────────────────────────────────────────────
+// ─── Layout ───────────────────────────────────────────────────────────────────
+const W = 700;
+const H = 300;
+const CLIENT_X = 20;
+const LB_X = 226;
+const LB_W = 108;
+const LB_H = 96;
+const SRV_X = 470;
+const SRV_W = 158;
+const SRV_H = 54;
+const SRV_Y = [34, 122, 210];
+const MID_Y = H / 2 - 22;
 
-let rrIdx = 0;
-
-function pickServer(servers: Server[], algo: Algorithm): Server | null {
-  const healthy = servers.filter((s) => s.status === "healthy");
+/**
+ * Pure selection, so each algorithm's behaviour can be reasoned about directly.
+ * `turn` is the round-robin cursor; the caller owns it.
+ */
+export function selectServer(
+  servers: ServerState[],
+  algo: Algorithm,
+  turn: number,
+  rand = Math.random
+): ServerState | null {
+  const healthy = servers.filter((s) => s.healthy);
   if (!healthy.length) return null;
 
   if (algo === "round-robin") {
-    const s = healthy[rrIdx % healthy.length];
-    rrIdx++;
-    return s;
+    return healthy[turn % healthy.length];
   }
-
   if (algo === "least-connections") {
-    return healthy.reduce((min, s) => s.activeConns < min.activeConns ? s : min, healthy[0]);
+    // Ties resolve to the earliest server, keeping the demo deterministic.
+    return healthy.reduce((min, s) => (s.active < min.active ? s : min), healthy[0]);
   }
-
-  if (algo === "weighted") {
-    const pool: Server[] = [];
-    healthy.forEach((s) => { for (let i = 0; i < s.weight; i++) pool.push(s); });
-    return pool[Math.floor(Math.random() * pool.length)];
-  }
-
-  return healthy[0];
+  // Weighted: expand into a pool so each server appears `weight` times.
+  const pool = healthy.flatMap((s) => Array.from({ length: s.weight }, () => s));
+  return pool[Math.floor(rand() * pool.length)];
 }
 
-// ─── Layout ───────────────────────────────────────────────────────────────────
-
-const LB_X = 160; const LB_CY = 145;
-const SERVER_X = 310;
-const SERVER_Y = [40, 120, 200];
+interface Hop {
+  serverId: string;
+  returning: boolean;
+}
 
 export function LoadBalancingViz() {
-  const [servers, setServers]   = useState<Server[]>(structuredClone(INITIAL_SERVERS));
-  const [algo, setAlgo]         = useState<Algorithm>("round-robin");
-  const [packets, setPackets]   = useState<Packet[]>([]);
-  const [running, setRunning]   = useState(false);
-  const [log, setLog]           = useState<string[]>([]);
-  const packetId = useRef(0);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [servers, setServers] = useState<ServerState[]>(() => structuredClone(INITIAL));
+  const [algo, setAlgo] = useState<Algorithm>("round-robin");
+  const [running, setRunning] = useState(false);
+  const [rejected, setRejected] = useState(0);
 
-  function addLog(msg: string) { setLog((p) => [msg, ...p].slice(0, 8)); }
+  const { entries, push, clear: clearLog } = useEventLog(6);
+  const { ref: hostRef, onScreen } = useOnScreen<HTMLDivElement>();
+  const reduced = useReducedMotion();
 
-  const sendRequest = useCallback(() => {
-    const chosen = pickServer(servers, algo);
-    if (!chosen) { addLog("✗ No healthy servers!"); return; }
+  // Round-robin cursor as instance state. It used to be a module-level `let`,
+  // which leaked between component instances and across navigations.
+  const turn = useRef(0);
+  const serversRef = useRef(servers);
+  useEffect(() => { serversRef.current = servers; }, [servers]);
 
-    const color = SERVER_COLORS[INITIAL_SERVERS.findIndex((s) => s.id === chosen.id)];
-    const p: Packet = { id: packetId.current++, serverId: chosen.id, progress: 0, returning: false, color };
-    setPackets((prev) => [...prev.slice(-15), p]);
-    setServers((prev) => prev.map((s) =>
-      s.id === chosen.id ? { ...s, activeConns: s.activeConns + 1, totalReqs: s.totalReqs + 1 } : s
-    ));
-    addLog(`→ [${algo}] routed to ${chosen.label} (${chosen.activeConns + 1} active)`);
-
-    setTimeout(() => {
-      setPackets((prev) => prev.map((pk) => pk.id === p.id ? { ...pk, returning: true } : pk));
-      setTimeout(() => {
-        setServers((prev) => prev.map((s) =>
-          s.id === chosen.id ? { ...s, activeConns: Math.max(0, s.activeConns - 1) } : s
-        ));
-      }, 600);
-    }, chosen.latency * 4);
-  }, [servers, algo]);
-
-  useEffect(() => {
-    if (!running) { if (intervalRef.current) clearInterval(intervalRef.current); return; }
-    intervalRef.current = setInterval(sendRequest, 500);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [running, sendRequest]);
-
-  useEffect(() => {
-    let raf: number;
-    const tick = () => {
-      setPackets((prev) =>
-        prev.map((p) => ({ ...p, progress: Math.min(p.progress + 0.03, 1) })).filter((p) => p.progress < 1)
+  const { flights, launch, clear: clearFlights } = useFlights<Hop>({
+    active: onScreen,
+    max: 14,
+    reduced,
+    onLand: (f) => {
+      if (f.meta.returning) return;
+      const srv = serversRef.current.find((s) => s.id === f.meta.serverId);
+      if (!srv) return;
+      // Response travels back, then the connection is released.
+      launch({ serverId: f.meta.serverId, returning: true }, { duration: srv.serviceMs, linger: 250 });
+      setServers((prev) =>
+        prev.map((s) => (s.id === f.meta.serverId ? { ...s, active: Math.max(0, s.active - 1) } : s))
       );
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
+    },
+  });
 
-  function toggleServer(id: string) {
-    setServers((prev) => prev.map((s) =>
-      s.id === id ? { ...s, status: s.status === "healthy" ? "unhealthy" : "healthy" } : s
-    ));
-    const s = servers.find((sv) => sv.id === id)!;
-    addLog(s.status === "healthy"
-      ? `⚠ ${s.label} marked unhealthy — health check failed`
-      : `✓ ${s.label} recovered — re-added to pool`
+  const send = useCallback(() => {
+    const chosen = selectServer(serversRef.current, algo, turn.current);
+    if (!chosen) {
+      setRejected((n) => n + 1);
+      push("✗ 503 — no healthy servers in the pool", "danger");
+      return;
+    }
+    if (algo === "round-robin") turn.current += 1;
+
+    launch({ serverId: chosen.id, returning: false }, { duration: MOTION.base, linger: 200 });
+    setServers((prev) =>
+      prev.map((s) => (s.id === chosen.id ? { ...s, active: s.active + 1, total: s.total + 1 } : s))
+    );
+    push(`→ ${chosen.label} · ${chosen.active + 1} in flight`, "primary");
+  }, [algo, launch, push]);
+
+  useInterval(running && onScreen, 600, send);
+
+  function toggleHealth(id: string) {
+    const srv = serversRef.current.find((s) => s.id === id)!;
+    setServers((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, healthy: !s.healthy, active: s.healthy ? 0 : s.active } : s))
+    );
+    push(
+      srv.healthy
+        ? `⚠ ${srv.label} failed its health check — drained from the pool`
+        : `✓ ${srv.label} passed health checks — back in the pool`,
+      srv.healthy ? "warning" : "success"
     );
   }
 
   function reset() {
-    rrIdx = 0;
-    setServers(structuredClone(INITIAL_SERVERS));
-    setPackets([]);
-    setLog([]);
+    turn.current = 0;
+    const fresh = structuredClone(INITIAL);
+    serversRef.current = fresh;
+    setServers(fresh);
+    setRejected(0);
     setRunning(false);
+    clearFlights();
+    clearLog();
   }
 
-  const totalReqs = servers.reduce((s, sv) => s + sv.totalReqs, 0);
+  const total = servers.reduce((a, s) => a + s.total, 0);
+  const healthyCount = servers.filter((s) => s.healthy).length;
+  const inFlight = servers.reduce((a, s) => a + s.active, 0);
+
+  // Even-distribution error: how far the worst server is from its fair share.
+  const fairShares = servers.filter((s) => s.healthy);
+  const expected = (s: ServerState) =>
+    algo === "weighted"
+      ? s.weight / Math.max(fairShares.reduce((a, x) => a + x.weight, 0), 1)
+      : 1 / Math.max(fairShares.length, 1);
+  const skew = total
+    ? Math.round(
+        Math.max(...fairShares.map((s) => Math.abs(s.total / total - expected(s)))) * 100
+      )
+    : 0;
 
   return (
-    <div className="flex flex-col gap-5">
-
-      {/* Algorithm selector */}
-      <div className="flex flex-wrap gap-2 items-center">
-        <span className="text-xs text-zinc-500">Algorithm:</span>
-        {([
-          { value: "round-robin",       label: "Round Robin",        desc: "equal turns" },
-          { value: "least-connections", label: "Least Connections",  desc: "fewest active" },
-          { value: "weighted",          label: "Weighted",           desc: "by capacity" },
-        ] as const).map(({ value, label, desc }) => (
-          <button key={value} onClick={() => { setAlgo(value); rrIdx = 0; }}
-            className={`flex flex-col px-3 py-1.5 rounded-lg text-left border transition-colors ${
-              algo === value ? "bg-zinc-700 border-zinc-500" : "bg-zinc-900 border-zinc-800 hover:border-zinc-700"}`}>
-            <span className={`text-xs font-medium ${algo === value ? "text-white" : "text-zinc-300"}`}>{label}</span>
-            <span className="text-[10px] text-zinc-600">{desc}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Diagram */}
-      <div className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-        <svg width={480} height={280} viewBox="0 0 480 280" className="overflow-visible">
-          <defs>
-            <marker id="lb-arr" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto">
-              <polygon points="0 0,6 2.5,0 5" fill="#6366f1"/>
-            </marker>
-          </defs>
-
-          {/* Client */}
-          <rect x={30} y={LB_CY - 22} width={70} height={44} rx={8} fill="#18181b" stroke="#3f3f46" strokeWidth="1"/>
-          <text x={65} y={LB_CY - 5} textAnchor="middle" fill="#e4e4e7" fontSize="10" fontWeight="600" fontFamily="sans-serif">Client</text>
-          <text x={65} y={LB_CY + 9} textAnchor="middle" fill="#71717a" fontSize="8" fontFamily="sans-serif">requests</text>
-
-          {/* Arrow client → LB */}
-          <line x1={100} y1={LB_CY} x2={LB_X - 2} y2={LB_CY}
-            stroke="#3f3f46" strokeWidth="1" strokeDasharray="3,3" markerEnd="url(#lb-arr)"/>
-
-          {/* Load balancer */}
-          <rect x={LB_X} y={LB_CY - 38} width={70} height={76} rx={10}
-            fill="#1e1b4b" stroke="#6366f1" strokeWidth="2"/>
-          <text x={LB_X + 35} y={LB_CY - 16} textAnchor="middle" fill="#a5b4fc" fontSize="10" fontWeight="700" fontFamily="sans-serif">Load</text>
-          <text x={LB_X + 35} y={LB_CY - 2} textAnchor="middle" fill="#a5b4fc" fontSize="10" fontWeight="700" fontFamily="sans-serif">Balancer</text>
-          <text x={LB_X + 35} y={LB_CY + 14} textAnchor="middle" fill="#4f46e5" fontSize="7.5" fontFamily="monospace">
-            {algo === "round-robin" ? "round-robin" : algo === "least-connections" ? "least-conn" : "weighted"}
-          </text>
-          <text x={LB_X + 35} y={LB_CY + 27} textAnchor="middle" fill="#52525b" fontSize="7" fontFamily="monospace">
-            health checks ✓
-          </text>
-
-          {/* Lines LB → servers */}
-          {servers.map((sv, i) => (
-            <line key={sv.id}
-              x1={LB_X + 70} y1={LB_CY}
-              x2={SERVER_X} y2={SERVER_Y[i] + 22}
-              stroke={sv.status === "unhealthy" ? "#3f1515" : "#27272a"}
-              strokeWidth="1" strokeDasharray="4,3"/>
-          ))}
-
-          {/* Packets */}
-          {packets.map((p) => {
-            const i = INITIAL_SERVERS.findIndex((s) => s.id === p.serverId);
-            const destY = SERVER_Y[i] + 22;
-            const progress = p.returning
-              ? 1 - p.progress
-              : p.progress;
-            const cx = (LB_X + 70) + (SERVER_X - (LB_X + 70)) * progress;
-            const cy = LB_CY + (destY - LB_CY) * progress;
+    <VizFrame>
+      {/* Algorithm: a segmented control, since it is the primary variable here */}
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">
+          routing algorithm
+        </span>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          {ALGORITHMS.map((a) => {
+            const on = algo === a.value;
             return (
-              <g key={p.id} opacity={Math.sin(p.progress * Math.PI)}>
-                <circle cx={cx} cy={cy} r={5} fill={p.color}/>
-                <circle cx={cx} cy={cy} r={8} fill={p.color} opacity={0.2}/>
-              </g>
+              <button
+                key={a.value}
+                type="button"
+                onClick={() => { setAlgo(a.value); turn.current = 0; }}
+                aria-pressed={on}
+                className={`rounded-xl border px-3 py-2 text-left transition-all
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/70
+                  ${on
+                    ? "border-violet-500/60 bg-violet-500/10"
+                    : "border-zinc-800 bg-zinc-900/40 hover:border-zinc-700"}`}
+              >
+                <span className={`block text-[13px] font-medium ${on ? "text-violet-200" : "text-zinc-300"}`}>
+                  {a.label}
+                </span>
+                <span className="block text-[11px] text-zinc-500 mt-0.5">{a.desc}</span>
+              </button>
             );
           })}
-
-          {/* Server boxes */}
-          {servers.map((sv, i) => {
-            const isUnhealthy = sv.status === "unhealthy";
-            const pct = totalReqs ? Math.round((sv.totalReqs / totalReqs) * 100) : 0;
-            const color = SERVER_COLORS[i];
-            return (
-              <g key={sv.id}>
-                <rect x={SERVER_X} y={SERVER_Y[i]} width={110} height={44} rx={8}
-                  fill={isUnhealthy ? "#1c0a0a" : "#18181b"}
-                  stroke={isUnhealthy ? "#7f1d1d" : color}
-                  strokeWidth={isUnhealthy ? 1 : 1.5}
-                  opacity={isUnhealthy ? 0.5 : 1}/>
-                <text x={SERVER_X + 55} y={SERVER_Y[i] + 16} textAnchor="middle"
-                  fill={isUnhealthy ? "#7f1d1d" : "#e4e4e7"} fontSize="10" fontWeight="600" fontFamily="sans-serif">
-                  {sv.label}
-                </text>
-                <text x={SERVER_X + 55} y={SERVER_Y[i] + 30} textAnchor="middle"
-                  fill={isUnhealthy ? "#7f1d1d" : "#71717a"} fontSize="8" fontFamily="monospace">
-                  {isUnhealthy ? "× unhealthy" : `${sv.activeConns} active · ${pct}% traffic`}
-                </text>
-                {/* Weight badge */}
-                {algo === "weighted" && !isUnhealthy && (
-                  <text x={SERVER_X + 100} y={SERVER_Y[i] + 10} textAnchor="end"
-                    fill={color} fontSize="8" fontFamily="monospace">w:{sv.weight}</text>
-                )}
-                {/* Traffic bar */}
-                {!isUnhealthy && totalReqs > 0 && (
-                  <rect x={SERVER_X} y={SERVER_Y[i] + 44} width={Math.max(2, pct * 1.1)} height={4} rx={2}
-                    fill={color} opacity={0.6}/>
-                )}
-              </g>
-            );
-          })}
-        </svg>
-      </div>
-
-      {/* Server health toggles */}
-      <div className="flex flex-wrap gap-2 items-center">
-        <span className="text-xs text-zinc-500">Server health:</span>
-        {servers.map((sv, i) => (
-          <button key={sv.id} onClick={() => toggleServer(sv.id)}
-            className={`px-3 py-1 rounded-lg text-xs border transition-colors font-mono ${
-              sv.status === "unhealthy"
-                ? "bg-red-950/50 border-red-800 text-red-400"
-                : "bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-700"}`}
-            style={{ borderColor: sv.status === "healthy" ? SERVER_COLORS[i] + "66" : undefined }}>
-            {sv.status === "healthy" ? "✓" : "✗"} {sv.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Controls */}
-      <div className="flex flex-wrap gap-2">
-        <button onClick={() => setRunning((r) => !r)}
-          className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-            running ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-100" : "bg-violet-600 hover:bg-violet-500 text-white"}`}>
-          {running ? "⏸ Pause" : "▶ Send requests"}
-        </button>
-        <button onClick={sendRequest}
-          className="px-3 py-1.5 rounded-lg text-sm text-zinc-300 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors">
-          + One request
-        </button>
-        <button onClick={reset}
-          className="px-3 py-1.5 rounded-lg text-sm text-zinc-500 hover:text-zinc-300 transition-colors">
-          ↺ Reset
-        </button>
-      </div>
-
-      {log.length > 0 && (
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 flex flex-col gap-0.5 font-mono text-xs">
-          {log.map((e, i) => (
-            <div key={i} className={e.startsWith("✗") ? "text-red-400" : e.startsWith("⚠") ? "text-amber-400" : e.startsWith("✓") ? "text-emerald-400" : "text-zinc-400"}>
-              {e}
-            </div>
-          ))}
         </div>
-      )}
-    </div>
+      </div>
+
+      <div ref={hostRef}>
+        <VizStage>
+          <VizSvg w={W} h={H} label={`Load balancer distributing requests across three servers using ${algo}`}>
+            {/* Client → LB */}
+            <VizEdge from={[CLIENT_X + 96, MID_Y + 22]} to={[LB_X, MID_Y + 22]} hue="neutral" arrow />
+            <VizNode
+              x={CLIENT_X} y={MID_Y} w={96} h={44}
+              title="Clients" sublabel="requests" hue="neutral"
+            />
+
+            {/* Load balancer */}
+            <VizNode
+              x={LB_X} y={H / 2 - LB_H / 2} w={LB_W} h={LB_H}
+              title="Load"
+              sublabel="Balancer"
+              footnote={algo === "least-connections" ? "least-conn" : algo}
+              hue="primary"
+              active
+            />
+
+            {/* LB → each server */}
+            {servers.map((s, i) => (
+              <VizEdge
+                key={s.id}
+                from={[LB_X + LB_W, H / 2]}
+                to={[SRV_X, SRV_Y[i] + SRV_H / 2]}
+                hue={s.healthy ? s.hue : "danger"}
+                dashed={!s.healthy}
+                arrow={s.healthy}
+                dimmed={!s.healthy}
+              />
+            ))}
+
+            {/* Packets */}
+            {flights.map((f: Flight<Hop>) => {
+              const i = servers.findIndex((s) => s.id === f.meta.serverId);
+              if (i < 0) return null;
+              const a: [number, number] = [LB_X + LB_W, H / 2];
+              const b: [number, number] = [SRV_X, SRV_Y[i] + SRV_H / 2];
+              const t = easeInOut(f.t);
+              // Responses retrace the same line in reverse.
+              const [from, to] = f.meta.returning ? [b, a] : [a, b];
+              return (
+                <VizPacket
+                  key={f.id}
+                  x={from[0] + (to[0] - from[0]) * t}
+                  y={from[1] + (to[1] - from[1]) * t}
+                  hue={f.meta.returning ? "success" : servers[i].hue}
+                  r={f.meta.returning ? 4 : 5}
+                  opacity={f.landed ? fadeOut(f) : 1}
+                />
+              );
+            })}
+
+            {/* Servers — clickable to fail or recover */}
+            {servers.map((s, i) => {
+              const share = total ? (s.total / total) * 100 : 0;
+              return (
+                <g key={s.id}>
+                  <VizNode
+                    x={SRV_X} y={SRV_Y[i]} w={SRV_W} h={SRV_H}
+                    title={s.label}
+                    sublabel={s.healthy ? `${s.active} in flight` : "unhealthy — drained"}
+                    hue={s.healthy ? s.hue : "danger"}
+                    active={false}
+                    dimmed={!s.healthy}
+                    onClick={() => toggleHealth(s.id)}
+                    ariaLabel={`${s.label}, ${s.healthy ? "healthy" : "unhealthy"} — click to toggle`}
+                  />
+                  {/* Weight, only meaningful for the weighted algorithm */}
+                  {algo === "weighted" && s.healthy && (
+                    <VizText x={SRV_X + SRV_W - 10} y={SRV_Y[i] + 12} size={TYPE.micro} anchor="end" hue={s.hue} mono>
+                      w{s.weight}
+                    </VizText>
+                  )}
+                  {/* Traffic share bar */}
+                  <rect
+                    x={SRV_X} y={SRV_Y[i] + SRV_H + 5} width={SRV_W} height={5} rx={2.5}
+                    fill="#1c1c1f"
+                  />
+                  <rect
+                    x={SRV_X} y={SRV_Y[i] + SRV_H + 5}
+                    width={Math.max(share > 0 ? 3 : 0, (share / 100) * SRV_W)} height={5} rx={2.5}
+                    fill={HUE[s.healthy ? s.hue : "danger"].line}
+                    opacity={s.healthy ? 0.9 : 0.4}
+                    style={{ transition: "width 300ms cubic-bezier(0.16,1,0.3,1)" }}
+                  />
+                  <VizText
+                    x={SRV_X + SRV_W + 8} y={SRV_Y[i] + SRV_H + 7}
+                    size={TYPE.micro} anchor="start" mono
+                    fill={s.healthy ? HUE[s.hue].text : "#52525b"}
+                  >
+                    {Math.round(share)}%
+                  </VizText>
+                </g>
+              );
+            })}
+
+            <VizText x={SRV_X} y={16} size={TYPE.micro} anchor="start" fill="#3f3f46" mono>
+              click a server to fail it
+            </VizText>
+          </VizSvg>
+        </VizStage>
+      </div>
+
+      <VizControls>
+        <VizButton variant={running ? "secondary" : "primary"} active={running} onClick={() => setRunning((r) => !r)}>
+          {running ? "❙❙ Pause" : "▶ Send requests"}
+        </VizButton>
+        <VizButton onClick={send}>+ One request</VizButton>
+        <VizSpacer />
+        <VizButton variant="ghost" onClick={reset}>↺ Reset</VizButton>
+      </VizControls>
+
+      <VizStats
+        items={[
+          { label: "requests routed", value: total, hue: "primary" },
+          { label: "in flight", value: inFlight, hue: "info" },
+          { label: "healthy servers", value: `${healthyCount}/${servers.length}`, hue: healthyCount ? "success" : "danger", meter: [healthyCount, servers.length] },
+          { label: "distribution skew", value: `${skew}%`, hue: skew > 15 ? "warning" : "success", note: "vs fair share" },
+        ]}
+      />
+
+      <VizLog entries={entries} rows={4} />
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <VizLegend
+          items={[
+            { hue: "primary", label: "request out" },
+            { hue: "success", label: "response back" },
+            { hue: "danger", label: "drained", dashed: true },
+          ]}
+        />
+        <VizHint>
+          {rejected > 0 && <span className="text-red-400">{rejected} rejected · </span>}
+          Fail a server mid-run — watch traffic redistribute without dropping requests.
+        </VizHint>
+      </div>
+    </VizFrame>
   );
 }

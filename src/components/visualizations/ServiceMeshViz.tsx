@@ -1,265 +1,350 @@
 "use client";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useCallback } from "react";
+import {
+  VizFrame, VizStage, VizHint, VizButton, VizSpacer,
+  VizStats, VizLegend, VizLog,
+  VizSvg, VizText, VizEdge, VizPacket, VizNode, pointOnEdge,
+  useFlights, useInterval, useOnScreen, useReducedMotion, useEventLog,
+  fadeOut, easeInOut,
+  HUE, TYPE, STROKE, MOTION, type HueName, type Flight,
+} from "./_shared";
 
 type ServiceId = "frontend" | "orders" | "payments";
-type Mode = "without-mesh" | "with-mesh";
+type Mode = "without" | "with";
 
-interface Packet { id: number; from: ServiceId; to: ServiceId; progress: number; mtls: boolean; blocked: boolean; }
+interface Svc {
+  id: ServiceId;
+  label: string;
+  role: string;
+  hue: HueName;
+  x: number;
+  y: number;
+}
 
-const SERVICES: Record<ServiceId, { label: string; x: number; y: number; color: string }> = {
-  frontend: { label: "Frontend\nService", x: 40,  y: 120, color: "#6366f1" },
-  orders:   { label: "Order\nService",    x: 230, y: 30,  color: "#7c3aed" },
-  payments: { label: "Payment\nService",  x: 230, y: 210, color: "#0891b2" },
-};
+// ─── Layout ───────────────────────────────────────────────────────────────────
+const W = 720;
+const H = 330;
+const BOX_W = 132;
+const BOX_H = 60;
+const CAR_W = 44;
+const CP_X = 470;
+const CP_W = 150;
+const CP_H = 68;
 
-const FLOWS: Array<{ from: ServiceId; to: ServiceId }> = [
-  { from: "frontend", to: "orders" },
-  { from: "orders",   to: "payments" },
-  { from: "frontend", to: "payments" },
+const SERVICES: Svc[] = [
+  { id: "frontend", label: "Frontend", role: "web tier",     hue: "info",    x: 24,  y: 132 },
+  { id: "orders",   label: "Orders",   role: "order domain", hue: "primary", x: 250, y: 26  },
+  { id: "payments", label: "Payments", role: "PSP adapter",  hue: "success", x: 250, y: 238 },
 ];
 
-const BOX_W = 100;
-const BOX_H = 52;
-const SIDECAR_W = 28;
-const SIDECAR_H = 52;
+const FLOWS: Array<{ from: ServiceId; to: ServiceId; curve?: number }> = [
+  { from: "frontend", to: "orders" },
+  { from: "frontend", to: "payments" },
+  // Bows out to the right; drawn straight it crosses frontend → payments.
+  { from: "orders",   to: "payments", curve: -70 },
+];
 
-function svcCX(id: ServiceId, mode: Mode, isSidecar = false) {
-  const s = SERVICES[id];
-  if (mode === "without-mesh") return s.x + BOX_W / 2;
-  // With mesh: main box + sidecar beside it
-  if (isSidecar) return s.x + BOX_W + SIDECAR_W / 2 + 2;
-  return s.x + BOX_W / 2;
+const byId = (id: ServiceId) => SERVICES.find((s) => s.id === id)!;
+
+/** Traffic leaves through the sidecar when the mesh is on, else straight from the app. */
+function egress(id: ServiceId, mode: Mode): [number, number] {
+  const s = byId(id);
+  const w = mode === "with" ? BOX_W + CAR_W + 4 : BOX_W;
+  return [s.x + w, s.y + BOX_H / 2];
 }
-function svcCY(id: ServiceId) { return SERVICES[id].y + BOX_H / 2; }
+function ingress(id: ServiceId): [number, number] {
+  const s = byId(id);
+  return [s.x, s.y + BOX_H / 2];
+}
+
+interface Hop {
+  from: ServiceId;
+  to: ServiceId;
+  /** Rejected by the sidecar's mTLS policy */
+  blocked: boolean;
+  mtls: boolean;
+  /** Matches the drawn edge's bow so the packet follows the same path */
+  curve?: number;
+}
+
+const CAPABILITIES: Record<Mode, Array<{ icon: string; text: string }>> = {
+  without: [
+    { icon: "✗", text: "Plain HTTP between services — readable on the wire" },
+    { icon: "✗", text: "Every service reimplements retries, timeouts, breakers" },
+    { icon: "✗", text: "Observability differs per team — no uniform traces" },
+    { icon: "✗", text: "No way to enforce which service may call which" },
+  ],
+  with: [
+    { icon: "🔒", text: "mTLS on every hop — encrypted and mutually authenticated" },
+    { icon: "↺",  text: "Retries and timeouts handled by the proxy, not app code" },
+    { icon: "⚡", text: "Circuit breaking at the network layer" },
+    { icon: "📊", text: "Uniform traces, metrics and logs across all services" },
+    { icon: "🚦", text: "Traffic splitting for canary and A/B at the proxy" },
+  ],
+};
 
 export function ServiceMeshViz() {
-  const [mode, setMode]     = useState<Mode>("without-mesh");
-  const [packets, setPackets] = useState<Packet[]>([]);
+  const [mode, setMode] = useState<Mode>("without");
+  const [strict, setStrict] = useState(false);
   const [running, setRunning] = useState(false);
-  const [mtlsBlock, setMtlsBlock] = useState(false);
-  const [log, setLog]         = useState<string[]>([]);
-  const packetId = useRef(0);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const logId = useRef(0);
+  const [counts, setCounts] = useState({ ok: 0, blocked: 0, plain: 0 });
 
-  function addLog(msg: string) { setLog((p) => [msg, ...p].slice(0, 8)); }
+  const { entries, push, clear: clearLog } = useEventLog(6);
+  const { ref: hostRef, onScreen } = useOnScreen<HTMLDivElement>();
+  const reduced = useReducedMotion();
 
-  const spawn = useCallback(() => {
-    const flow = FLOWS[Math.floor(Math.random() * FLOWS.length)];
-    const blocked = mtlsBlock && mode === "with-mesh" && Math.random() < 0.4;
-    const p: Packet = {
-      id: packetId.current++,
-      from: flow.from, to: flow.to,
-      progress: 0,
-      mtls: mode === "with-mesh",
-      blocked,
-    };
-    setPackets((prev) => [...prev.slice(-10), p]);
-    if (blocked) addLog(`✗ mTLS: rejected unverified cert ${flow.from}→${flow.to}`);
-    else if (mode === "with-mesh") addLog(`✓ mTLS handshake ok ${flow.from}→${flow.to}`);
-    else addLog(`→ plain HTTP ${flow.from}→${flow.to}`);
-  }, [mode, mtlsBlock]);
-
-  useEffect(() => {
-    if (!running) { if (intervalRef.current) clearInterval(intervalRef.current); return; }
-    intervalRef.current = setInterval(spawn, 700);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [running, spawn]);
-
-  useEffect(() => {
-    let raf: number;
-    const tick = () => {
-      setPackets((prev) =>
-        prev.map((p) => ({ ...p, progress: Math.min(p.progress + 0.03, 1) })).filter((p) => p.progress < 1)
+  const { flights, launch, clear: clearFlights } = useFlights<Hop>({
+    active: onScreen,
+    max: 12,
+    reduced,
+    onLand: (f) => {
+      if (f.meta.blocked) return;
+      setCounts((c) =>
+        f.meta.mtls ? { ...c, ok: c.ok + 1 } : { ...c, plain: c.plain + 1 }
       );
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
+    },
+  });
 
-  const SVG_W = 380;
-  const SVG_H = 320;
+  const send = useCallback(() => {
+    const flow = FLOWS[Math.floor(Math.random() * FLOWS.length)];
+    const mtls = mode === "with";
+    // With strict mTLS, a workload presenting an unknown cert is refused.
+    const blocked = mtls && strict && Math.random() < 0.35;
+
+    launch(
+      { ...flow, blocked, mtls },
+      // A blocked call dies at the sidecar, so it travels only a short way.
+      { duration: blocked ? MOTION.quick : MOTION.flight, linger: blocked ? 800 : 300 }
+    );
+
+    if (blocked) {
+      setCounts((c) => ({ ...c, blocked: c.blocked + 1 }));
+      push(`✗ mTLS denied ${flow.from} → ${flow.to} — unknown identity`, "danger");
+    } else if (mtls) {
+      push(`🔒 mTLS ok ${flow.from} → ${flow.to}`, "success");
+    } else {
+      push(`→ plain HTTP ${flow.from} → ${flow.to}`, "warning");
+    }
+  }, [launch, mode, strict, push]);
+
+  useInterval(running && onScreen, 850, send);
+
+  function switchMode(m: Mode) {
+    setMode(m);
+    setRunning(false);
+    clearFlights();
+    clearLog();
+    setCounts({ ok: 0, blocked: 0, plain: 0 });
+  }
+
+  const total = counts.ok + counts.blocked + counts.plain;
+  const encryptedPct = total ? Math.round((counts.ok / total) * 100) : 0;
 
   return (
-    <div className="flex flex-col gap-5">
+    <VizFrame>
+      {/* Mode is the central comparison, so it leads */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="inline-flex rounded-xl overflow-hidden border border-zinc-800">
+          {([
+            { v: "without" as Mode, label: "Without mesh" },
+            { v: "with" as Mode, label: "With service mesh" },
+          ]).map(({ v, label }) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => switchMode(v)}
+              aria-pressed={mode === v}
+              className={`px-3.5 py-1.5 text-[13px] font-medium transition-colors
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/70
+                ${mode === v
+                  ? v === "with" ? "bg-emerald-500/20 text-emerald-200" : "bg-red-500/15 text-red-200"
+                  : "bg-zinc-900/60 text-zinc-400 hover:text-zinc-200"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
 
-      {/* Mode toggle */}
-      <div className="flex flex-wrap gap-2 items-center">
-        {([
-          { value: "without-mesh", label: "Without mesh" },
-          { value: "with-mesh",    label: "With service mesh" },
-        ] as const).map(({ value, label }) => (
-          <button key={value} onClick={() => { setMode(value); setPackets([]); setRunning(false); }}
-            className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-              mode === value ? "bg-zinc-700 border-zinc-500 text-white" : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700"}`}>
-            {label}
-          </button>
-        ))}
-        {mode === "with-mesh" && (
-          <button onClick={() => setMtlsBlock((b) => !b)}
-            className={`px-3 py-1.5 rounded-lg text-xs border transition-colors ml-2 ${
-              mtlsBlock ? "bg-red-950 border-red-700 text-red-400" : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700"}`}>
-            {mtlsBlock ? "🔒 mTLS blocking bad certs" : "Allow all certs"}
-          </button>
+        {mode === "with" && (
+          <VizButton
+            variant={strict ? "danger" : "secondary"}
+            active={strict}
+            onClick={() => setStrict((b) => !b)}
+            title="Reject workloads without a valid mesh identity"
+          >
+            {strict ? "🔒 STRICT mTLS" : "PERMISSIVE mTLS"}
+          </VizButton>
         )}
+
+        <VizSpacer />
+        <VizButton variant={running ? "secondary" : "primary"} active={running} onClick={() => setRunning((r) => !r)}>
+          {running ? "❙❙ Pause" : "▶ Animate traffic"}
+        </VizButton>
+        <VizButton onClick={send}>+ Send request</VizButton>
       </div>
 
-      <div className="flex flex-col lg:flex-row gap-4">
-        {/* SVG */}
-        <div className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-950 p-4 shrink-0">
-          <svg width={SVG_W} height={SVG_H} viewBox={`0 0 ${SVG_W} ${SVG_H}`} className="overflow-visible">
-            <defs>
-              <marker id="mesh-arr" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto">
-                <polygon points="0 0,6 2.5,0 5" fill="#52525b"/>
-              </marker>
-            </defs>
+      <div ref={hostRef}>
+        <VizStage>
+          <VizSvg
+            w={W} h={H}
+            label={mode === "with"
+              ? "Three services each fronted by a sidecar proxy, configured by a control plane"
+              : "Three services calling each other directly over plain HTTP"}
+          >
+            {/* Flow lines */}
+            {FLOWS.map((f, i) => (
+              <VizEdge
+                key={i}
+                from={egress(f.from, mode)}
+                to={ingress(f.to)}
+                hue={mode === "with" ? "success" : "warning"}
+                dashed={mode === "without"}
+                curve={f.curve ?? 0}
+                arrow
+              />
+            ))}
 
-            {/* Static flow lines */}
-            {FLOWS.map((f, i) => {
-              const x1 = svcCX(f.from, mode) + (mode === "with-mesh" ? SIDECAR_W / 2 + BOX_W / 2 : BOX_W / 2);
-              const y1 = svcCY(f.from);
-              const x2 = svcCX(f.to, mode) - (mode === "without-mesh" ? BOX_W / 2 : 0);
-              const y2 = svcCY(f.to);
-              return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2}
-                stroke="#27272a" strokeWidth="1" strokeDasharray="3,3" markerEnd="url(#mesh-arr)"/>;
-            })}
+            {/* Control plane → sidecars (config push) */}
+            {mode === "with" && SERVICES.map((s) => (
+              <VizEdge
+                key={`cp-${s.id}`}
+                from={[CP_X, 150]}
+                to={[s.x + BOX_W + 4 + CAR_W / 2, s.y + BOX_H]}
+                hue="info"
+                dashed
+                dimmed
+              />
+            ))}
 
             {/* Packets */}
-            {packets.map((p) => {
-              const x1 = svcCX(p.from, mode) + (mode === "with-mesh" ? SIDECAR_W / 2 + BOX_W / 2 : BOX_W / 2);
-              const y1 = svcCY(p.from);
-              const x2 = svcCX(p.to, mode) - (mode === "without-mesh" ? BOX_W / 2 : 0);
-              const y2 = svcCY(p.to);
-              const cx = x1 + (x2 - x1) * p.progress;
-              const cy = y1 + (y2 - y1) * p.progress;
-              const color = p.blocked ? "#ef4444" : p.mtls ? "#34d399" : "#818cf8";
+            {flights.map((f: Flight<Hop>) => {
+              const [px, py] = pointOnEdge(
+                egress(f.meta.from, mode),
+                ingress(f.meta.to),
+                f.meta.curve ?? 0,
+                easeInOut(f.t)
+              );
+              const hue: HueName = f.meta.blocked ? "danger" : f.meta.mtls ? "success" : "warning";
               return (
-                <g key={p.id} opacity={Math.sin(p.progress * Math.PI)}>
-                  <circle cx={cx} cy={cy} r={5} fill={color}/>
-                  <circle cx={cx} cy={cy} r={8} fill={color} opacity={0.2}/>
-                  {p.mtls && !p.blocked && (
-                    <text x={cx + 8} y={cy - 4} fontSize="8" fill={color} fontFamily="monospace">🔒</text>
-                  )}
+                <g key={f.id}>
+                  <VizPacket
+                    x={px}
+                    y={py}
+                    hue={hue}
+                    r={5}
+                    opacity={f.landed ? fadeOut(f) : 1}
+                    label={f.meta.blocked && f.landed ? "denied" : undefined}
+                  />
                 </g>
               );
             })}
 
-            {/* Service nodes */}
-            {(Object.entries(SERVICES) as [ServiceId, typeof SERVICES[ServiceId]][]).map(([id, svc]) => (
-              <g key={id}>
-                {/* Main service box */}
-                <rect x={svc.x} y={svc.y} width={BOX_W} height={BOX_H} rx={8}
-                  fill="#18181b" stroke={svc.color} strokeWidth="1.5"/>
-                {svc.label.split("\n").map((line, li) => (
-                  <text key={li} x={svc.x + BOX_W / 2} y={svc.y + 18 + li * 14}
-                    textAnchor="middle" fill="#e4e4e7" fontSize="10" fontWeight="600" fontFamily="sans-serif">
-                    {line}
-                  </text>
-                ))}
-
-                {/* Sidecar proxy (mesh only) */}
-                {mode === "with-mesh" && (
+            {/* Services, each with its sidecar when the mesh is on */}
+            {SERVICES.map((s) => (
+              <g key={s.id}>
+                <VizNode
+                  x={s.x} y={s.y} w={BOX_W} h={BOX_H}
+                  title={s.label} sublabel={s.role}
+                  hue={s.hue}
+                />
+                {mode === "with" && (
                   <g>
-                    <rect x={svc.x + BOX_W + 2} y={svc.y} width={SIDECAR_W} height={SIDECAR_H} rx={5}
-                      fill="#1e1b4b" stroke="#4f46e5" strokeWidth="1" strokeDasharray="3,2"/>
-                    <text x={svc.x + BOX_W + 2 + SIDECAR_W / 2} y={svc.y + BOX_H / 2 - 4}
-                      textAnchor="middle" fill="#818cf8" fontSize="7" fontFamily="monospace">
-                      Envoy
-                    </text>
-                    <text x={svc.x + BOX_W + 2 + SIDECAR_W / 2} y={svc.y + BOX_H / 2 + 8}
-                      textAnchor="middle" fill="#4f46e5" fontSize="7" fontFamily="monospace">
-                      proxy
-                    </text>
+                    <rect
+                      x={s.x + BOX_W + 4} y={s.y} width={CAR_W} height={BOX_H} rx={8}
+                      fill="url(#viz-node-active)"
+                      stroke={HUE.info.line} strokeWidth={STROKE.thin} strokeDasharray="4 3"
+                    />
+                    <VizText x={s.x + BOX_W + 4 + CAR_W / 2} y={s.y + BOX_H / 2 - 7} size={TYPE.micro} mono hue="info">
+                      envoy
+                    </VizText>
+                    <VizText x={s.x + BOX_W + 4 + CAR_W / 2} y={s.y + BOX_H / 2 + 7} size={TYPE.micro} mono fill="#3b82f6">
+                      🔒
+                    </VizText>
                   </g>
                 )}
               </g>
             ))}
 
-            {/* Control plane (mesh only) */}
-            {mode === "with-mesh" && (
+            {/* Control plane, or the warning that replaces it */}
+            {mode === "with" ? (
               <g>
-                <rect x={300} y={120} width={70} height={44} rx={8} fill="#0f172a" stroke="#3b82f6" strokeWidth="1" strokeDasharray="3,2"/>
-                <text x={335} y={138} textAnchor="middle" fill="#60a5fa" fontSize="9" fontWeight="600" fontFamily="sans-serif">Control</text>
-                <text x={335} y={152} textAnchor="middle" fill="#60a5fa" fontSize="9" fontFamily="sans-serif">Plane</text>
-                <text x={335} y={164} textAnchor="middle" fill="#3b82f6" fontSize="7.5" fontFamily="monospace">Istio/Linkerd</text>
-                {/* Dashed config lines to sidecars */}
-                {(Object.values(SERVICES)).map((svc, i) => (
-                  <line key={i}
-                    x1={300} y1={142}
-                    x2={svc.x + BOX_W + SIDECAR_W / 2 + 2} y2={svc.y + BOX_H / 2}
-                    stroke="#1e40af" strokeWidth="1" strokeDasharray="2,3" opacity="0.5"/>
-                ))}
+                <rect
+                  x={CP_X} y={150 - CP_H / 2} width={CP_W} height={CP_H} rx={12}
+                  fill="#0b1220" stroke={HUE.info.line} strokeWidth={STROKE.thin} strokeDasharray="5 3"
+                />
+                <VizText x={CP_X + CP_W / 2} y={150 - 16} size={TYPE.body} weight={700} hue="info">
+                  Control Plane
+                </VizText>
+                <VizText x={CP_X + CP_W / 2} y={150 + 2} size={TYPE.micro} mono fill="#3b82f6">
+                  Istio · Linkerd
+                </VizText>
+                <VizText x={CP_X + CP_W / 2} y={150 + 18} size={TYPE.micro} fill="#52525b">
+                  pushes policy + certs
+                </VizText>
+              </g>
+            ) : (
+              <g>
+                <rect
+                  x={CP_X} y={150 - CP_H / 2} width={CP_W} height={CP_H} rx={12}
+                  fill="#1a0a0a" stroke={HUE.danger.base} strokeWidth={STROKE.thin}
+                />
+                <VizText x={CP_X + CP_W / 2} y={150 - 16} size={TYPE.body} weight={700} hue="danger">
+                  No mTLS
+                </VizText>
+                <VizText x={CP_X + CP_W / 2} y={150 + 2} size={TYPE.micro} fill="#fca5a5">
+                  plain HTTP on the wire
+                </VizText>
+                <VizText x={CP_X + CP_W / 2} y={150 + 18} size={TYPE.micro} fill="#7f1d1d" mono>
+                  no identity · no policy
+                </VizText>
               </g>
             )}
-
-            {/* Without mesh warning */}
-            {mode === "without-mesh" && (
-              <g>
-                <rect x={240} y={120} width={130} height={52} rx={8} fill="#450a0a" stroke="#7f1d1d" strokeWidth="1"/>
-                <text x={305} y={139} textAnchor="middle" fill="#fca5a5" fontSize="9" fontWeight="600" fontFamily="sans-serif">No mTLS</text>
-                <text x={305} y={153} textAnchor="middle" fill="#fca5a5" fontSize="8" fontFamily="sans-serif">Plain HTTP between</text>
-                <text x={305} y={165} textAnchor="middle" fill="#fca5a5" fontSize="8" fontFamily="sans-serif">services — unencrypted</text>
-              </g>
-            )}
-          </svg>
-        </div>
-
-        {/* Info panel */}
-        <div className="flex flex-col gap-3 flex-1">
-          {mode === "without-mesh" ? (
-            <>
-              <h3 className="font-semibold text-red-400 text-sm">Problems without a mesh</h3>
-              {[
-                "Service-to-service traffic is plain HTTP — readable on the network",
-                "Every service must implement retries, timeouts, circuit breakers itself",
-                "No uniform observability — each team instruments differently",
-                "No way to enforce which service can call which",
-              ].map((item) => (
-                <div key={item} className="flex gap-2 text-xs text-zinc-400">
-                  <span className="text-red-600 shrink-0 mt-0.5">✗</span>{item}
-                </div>
-              ))}
-            </>
-          ) : (
-            <>
-              <h3 className="font-semibold text-emerald-400 text-sm">What the sidecar handles</h3>
-              {[
-                ["🔒", "mTLS — all traffic encrypted and authenticated"],
-                ["↺",  "Retries and timeouts — no app code needed"],
-                ["⚡", "Circuit breaking — automatic at network layer"],
-                ["📊", "Traces, metrics, logs — uniform across all services"],
-                ["🚦", "Traffic splitting — canary, A/B at the proxy level"],
-              ].map(([icon, text]) => (
-                <div key={String(text)} className="flex gap-2 text-xs text-zinc-300">
-                  <span className="shrink-0">{icon}</span>{text}
-                </div>
-              ))}
-            </>
-          )}
-        </div>
+          </VizSvg>
+        </VizStage>
       </div>
 
-      {/* Controls */}
-      <div className="flex flex-wrap gap-2 items-center">
-        <button onClick={() => setRunning((r) => !r)}
-          className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-            running ? "bg-zinc-700 hover:bg-zinc-600 text-zinc-100" : "bg-violet-600 hover:bg-violet-500 text-white"}`}>
-          {running ? "⏸ Pause" : "▶ Animate traffic"}
-        </button>
-        <button onClick={spawn}
-          className="px-3 py-1.5 rounded-lg text-sm text-zinc-300 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors">
-          + Send request
-        </button>
+      <VizStats
+        items={[
+          { label: "requests", value: total, hue: "primary" },
+          {
+            label: mode === "with" ? "mTLS encrypted" : "unencrypted",
+            value: mode === "with" ? `${encryptedPct}%` : `${counts.plain}`,
+            hue: mode === "with" ? "success" : "warning",
+            ...(mode === "with" ? { meter: [counts.ok, Math.max(total, 1)] as [number, number] } : {}),
+          },
+          { label: "denied by policy", value: counts.blocked, hue: "danger" },
+        ]}
+      />
+
+      {/* What changes between the two modes */}
+      <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/30 px-4 py-3 flex flex-col gap-1.5">
+        <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">
+          {mode === "with" ? "handled by the sidecar" : "left to every service"}
+        </span>
+        {CAPABILITIES[mode].map((c) => (
+          <div key={c.text} className="flex gap-2 text-[13px]">
+            <span className={`shrink-0 ${mode === "with" ? "" : "text-red-500"}`}>{c.icon}</span>
+            <span className={mode === "with" ? "text-zinc-300" : "text-zinc-400"}>{c.text}</span>
+          </div>
+        ))}
       </div>
 
-      {log.length > 0 && (
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 flex flex-col gap-0.5 font-mono text-xs">
-          {log.map((e, i) => (
-            <div key={i} className={e.startsWith("✗") ? "text-red-400" : e.startsWith("✓") ? "text-emerald-400" : "text-zinc-400"}>{e}</div>
-          ))}
-        </div>
-      )}
-    </div>
+      <VizLog entries={entries} rows={4} />
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <VizLegend
+          items={
+            mode === "with"
+              ? [{ hue: "success", label: "mTLS encrypted" }, { hue: "danger", label: "denied by policy" }]
+              : [{ hue: "warning", label: "plain HTTP", dashed: true }]
+          }
+        />
+        <VizHint>
+          {mode === "with"
+            ? "Turn on STRICT and watch calls without a valid identity die at the proxy."
+            : "Nothing here is encrypted or authenticated — switch the mesh on."}
+        </VizHint>
+      </div>
+    </VizFrame>
   );
 }

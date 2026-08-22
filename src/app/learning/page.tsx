@@ -26,7 +26,7 @@ const MODULE_META: Record<string, {
   badge: string;
 }> = {
   "AI Architecture": {
-    description: "Build production-ready AI systems — RAG pipelines, vector databases, self-hosted inference, and private AI stacks.",
+    description: "Build production-ready AI systems — RAG pipelines, vector databases, self-hosted inference, private AI stacks, and tool integration over MCP.",
     icon: "✦",
     gradient: "from-amber-500/10 via-orange-500/5 to-transparent",
     border: "border-amber-500/25",
@@ -240,7 +240,7 @@ export default function LearningPage() {
       {/* Coming soon */}
       <div className="rounded-xl border border-dashed border-zinc-800/60 p-6 flex flex-col items-center justify-center gap-2 text-center">
         <p className="text-sm text-zinc-600">More lessons coming</p>
-        <p className="text-xs text-zinc-700">Load balancing · Database indexing · WebSockets · gRPC</p>
+        <p className="text-xs text-zinc-700">Agent architectures · Database indexing · WebSockets · gRPC · Observability</p>
       </div>
     </div>
   );

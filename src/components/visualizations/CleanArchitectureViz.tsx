@@ -1,232 +1,317 @@
 "use client";
 import { useState } from "react";
+import {
+  VizFrame, VizStage, VizHint, VizControls, VizButton, VizSpacer,
+  VizStatus, VizDetail, VizField, VizChip,
+  VizSvg, VizText,
+  useReducedMotion,
+  HUE, TYPE, STROKE, type HueName,
+} from "./_shared";
 
-const LAYERS = [
+interface Layer {
+  id: string;
+  label: string;
+  sublabel: string;
+  hue: HueName;
+  examples: string[];
+  description: string;
+}
+
+/** Outermost first — index 0 is the outer ring, and depth increases inward. */
+const LAYERS: Layer[] = [
   {
     id: "frameworks",
     label: "Frameworks & Drivers",
-    sublabel: "Web, DB, UI, Devices",
-    examples: ["Next.js", "PostgreSQL", "Docker", "REST API"],
-    color: "#4f46e5",
-    dimColor: "#312e81",
+    sublabel: "web · db · devices",
+    hue: "info",
+    examples: ["Next.js", "PostgreSQL", "Docker", "Stripe SDK"],
     description:
-      "The outermost layer. Frameworks, databases, web servers, and device drivers live here. All details are kept at the boundary — nothing here should leak inward.",
+      "The outermost ring is all detail: frameworks, databases, web servers, device drivers. Everything here is replaceable, and nothing inside is allowed to know it exists.",
   },
   {
     id: "adapters",
     label: "Interface Adapters",
-    sublabel: "Controllers, Presenters, Gateways",
-    examples: ["HTTP Controller", "Repository", "Presenter", "DTO"],
-    color: "#7c3aed",
-    dimColor: "#4c1d95",
+    sublabel: "controllers · gateways",
+    hue: "primary",
+    examples: ["HTTP Controller", "Repository impl", "Presenter", "DTO"],
     description:
-      "Converts data between the format convenient for Use Cases and the format convenient for external agents (UI, DB). Controllers receive input; Presenters format output; Repositories abstract storage.",
+      "Translation. Data arrives in whatever shape the outside world uses and leaves in the shape use cases want — controllers in, presenters out, repositories over storage.",
   },
   {
     id: "usecases",
     label: "Use Cases",
-    sublabel: "Application Business Rules",
-    examples: ["CreateOrder", "ChargePayment", "SendNotification"],
-    color: "#a855f7",
-    dimColor: "#6b21a8",
+    sublabel: "application rules",
+    hue: "warning",
+    examples: ["CreateOrder", "ChargePayment", "CancelBooking"],
     description:
-      "Application-specific business rules. Each use case orchestrates data flow to and from Entities. A change here does not affect Entities, and a change in the UI does not affect Use Cases.",
+      "Application-specific behaviour: the steps that make up one thing a user can do. Orchestrates entities, but knows nothing about HTTP, SQL, or the UI.",
   },
   {
     id: "entities",
     label: "Entities",
-    sublabel: "Enterprise Business Rules",
-    examples: ["Order", "User", "Product", "Invoice"],
-    color: "#d946ef",
-    dimColor: "#86198f",
+    sublabel: "enterprise rules",
+    hue: "danger",
+    examples: ["Order", "Invoice", "Money", "Booking"],
     description:
-      "The heart of the system. Entities encapsulate enterprise-wide business rules and are the most stable, least likely to change. They know nothing about databases, frameworks, or UI.",
+      "The rules that would still be true if you deleted the application. Most stable, least likely to change, and dependent on absolutely nothing.",
   },
 ];
 
+const SIZE = 460;
+const C = SIZE / 2;
+const OUTER_R = 176;
+const RING_W = 42;
+
+/** Outer radius of ring `i`. */
+const radiusAt = (i: number) => OUTER_R - i * RING_W;
+
 export function CleanArchitectureViz() {
   const [active, setActive] = useState<string | null>(null);
+  /** A demonstrated dependency: [fromLayerIndex, toLayerIndex] */
+  const [probe, setProbe] = useState<[number, number] | null>(null);
+  const reduced = useReducedMotion();
 
-  const activeLayer = LAYERS.find((l) => l.id === active);
-  const outerR = 200;
-  const ringWidth = 44;
-  const gap = 2;
+  const activeIdx = LAYERS.findIndex((l) => l.id === active);
+  const activeLayer = activeIdx >= 0 ? LAYERS[activeIdx] : null;
+
+  // A dependency is legal only when it points inward (higher index = deeper).
+  const legal = probe ? probe[1] > probe[0] : null;
+
+  function tryDependency(from: number, to: number) {
+    if (from === to) return;
+    setProbe([from, to]);
+  }
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-col lg:flex-row items-center gap-8">
-        {/* SVG diagram */}
-        <div className="shrink-0">
-          <svg
-            width={outerR * 2 + 20}
-            height={outerR * 2 + 20}
-            viewBox={`-10 -10 ${outerR * 2 + 20} ${outerR * 2 + 20}`}
-            className="overflow-visible"
-          >
-            {/* Dependency rule arrow */}
-            <defs>
-              <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-                <polygon points="0 0, 8 3, 0 6" fill="#6366f1" />
-              </marker>
-            </defs>
-            <line
-              x1={outerR + 30} y1={-8}
-              x2={outerR + 10} y2={-8}
-              stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#arrowhead)"
-              strokeDasharray="3,2"
-            />
-            <text x={outerR + 35} y={-4} fill="#6366f1" fontSize="9" fontFamily="monospace">
-              dependency rule
-            </text>
+    <VizFrame>
+      <VizStatus
+        hue={probe === null ? "neutral" : legal ? "success" : "danger"}
+        label={probe === null ? "THE DEPENDENCY RULE" : legal ? "ALLOWED" : "VIOLATION"}
+      >
+        {probe === null ? (
+          <>Source-code dependencies must always point <span className="text-violet-300">inward</span>. Nothing in an inner ring may name anything in an outer one.</>
+        ) : legal ? (
+          <><span className="font-mono text-zinc-200">{LAYERS[probe[0]].label}</span> → <span className="font-mono text-zinc-200">{LAYERS[probe[1]].label}</span> points inward. Fine.</>
+        ) : (
+          <><span className="font-mono text-zinc-200">{LAYERS[probe[0]].label}</span> → <span className="font-mono text-zinc-200">{LAYERS[probe[1]].label}</span> points outward. This is the dependency that rots a codebase — invert it with an interface owned by the inner layer.</>
+        )}
+      </VizStatus>
 
+      <div className="flex flex-col lg:flex-row gap-5 items-start">
+        <VizStage className="shrink-0 w-full lg:w-[420px]">
+          <VizSvg
+            w={SIZE} h={SIZE}
+            minWidth={320}
+            label="Four concentric Clean Architecture rings, from Frameworks and Drivers on the outside to Entities at the centre"
+          >
+            {/* Rings, outermost first so inner ones paint on top */}
             {LAYERS.map((layer, i) => {
-              const r = outerR - i * (ringWidth + gap);
+              const r = radiusAt(i);
               const isActive = active === layer.id;
               const isDimmed = active !== null && !isActive;
+              const c = HUE[layer.hue];
               return (
                 <g key={layer.id}>
                   <circle
-                    cx={outerR}
-                    cy={outerR}
-                    r={r}
-                    fill={isDimmed ? layer.dimColor : layer.color}
-                    stroke={isActive ? "#fff" : "transparent"}
-                    strokeWidth={2}
+                    cx={C} cy={C} r={r}
+                    fill={c.base}
+                    fillOpacity={isDimmed ? 0.1 : isActive ? 0.3 : 0.18}
+                    stroke={c.line}
+                    strokeWidth={isActive ? STROKE.thick : STROKE.thin}
+                    strokeOpacity={isDimmed ? 0.3 : 1}
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`${layer.label}: ${layer.sublabel}`}
+                    aria-pressed={isActive}
+                    onClick={() => setActive(isActive ? null : layer.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setActive(isActive ? null : layer.id);
+                      }
+                    }}
+                    className="viz-node-interactive"
                     style={{
                       cursor: "pointer",
-                      transition: "fill 0.2s, opacity 0.2s",
-                      opacity: isDimmed ? 0.5 : 1,
+                      transition: reduced ? undefined : "fill-opacity 220ms, stroke-width 220ms",
+                      outline: "none",
                     }}
-                    onClick={() => setActive(isActive ? null : layer.id)}
                   />
-                  {/* Layer label */}
-                  {!isDimmed && (
+                  {/* Label sits inside its own band, not on the ring below it. The
+                      innermost ring is labelled at the centre — the old version
+                      drew both and printed "Entities" twice. */}
+                  {i < LAYERS.length - 1 ? (
                     <>
-                      <text
-                        x={outerR}
-                        y={outerR - r + 16}
-                        textAnchor="middle"
-                        fill="rgba(255,255,255,0.9)"
-                        fontSize="10"
-                        fontWeight="600"
-                        fontFamily="sans-serif"
-                        style={{ pointerEvents: "none" }}
+                      <VizText
+                        x={C} y={C - r + RING_W / 2 - 6}
+                        size={TYPE.small} weight={600}
+                        fill={isDimmed ? "#52525b" : HUE.neutral.strong}
                       >
                         {layer.label}
-                      </text>
-                      <text
-                        x={outerR}
-                        y={outerR - r + 28}
-                        textAnchor="middle"
-                        fill="rgba(255,255,255,0.55)"
-                        fontSize="8"
-                        fontFamily="sans-serif"
-                        style={{ pointerEvents: "none" }}
+                      </VizText>
+                      <VizText
+                        x={C} y={C - r + RING_W / 2 + 9}
+                        size={TYPE.micro} mono
+                        fill={isDimmed ? "#3f3f46" : c.text}
                       >
                         {layer.sublabel}
-                      </text>
+                      </VizText>
+                    </>
+                  ) : (
+                    <>
+                      <VizText
+                        x={C} y={C - 8} size={TYPE.title} weight={700}
+                        fill={isDimmed ? "#52525b" : HUE.neutral.strong}
+                      >
+                        {layer.label}
+                      </VizText>
+                      <VizText
+                        x={C} y={C + 10} size={TYPE.micro} mono
+                        fill={isDimmed ? "#3f3f46" : c.text}
+                      >
+                        {layer.sublabel}
+                      </VizText>
                     </>
                   )}
                 </g>
               );
             })}
 
-            {/* Centre label */}
-            <text
-              x={outerR}
-              y={outerR - 6}
-              textAnchor="middle"
-              fill="rgba(255,255,255,0.95)"
-              fontSize="11"
-              fontWeight="700"
-              fontFamily="sans-serif"
-              style={{ pointerEvents: "none" }}
-            >
-              Entities
-            </text>
-            <text
-              x={outerR}
-              y={outerR + 8}
-              textAnchor="middle"
-              fill="rgba(255,255,255,0.55)"
-              fontSize="8"
-              fontFamily="sans-serif"
-              style={{ pointerEvents: "none" }}
-            >
-              Business Rules
-            </text>
-          </svg>
-        </div>
+            {/* The dependency rule, drawn as an inward arrow down the right side */}
+            <g>
+              <path
+                d={`M ${C + OUTER_R + 16} ${C} L ${C + radiusAt(LAYERS.length - 1) - 6} ${C}`}
+                stroke={HUE.primary.line}
+                strokeWidth={STROKE.thin}
+                strokeDasharray="5 4"
+                markerEnd="url(#viz-arrow-primary)"
+                className={reduced ? undefined : "viz-edge-flowing"}
+              />
+              <VizText
+                x={C} y={14}
+                size={TYPE.micro} hue="primary" mono
+              >
+                dependencies may only point inward →
+              </VizText>
+            </g>
 
-        {/* Info panel */}
-        <div className="flex-1 flex flex-col gap-4 min-h-[220px]">
-          {activeLayer ? (
-            <div
-              key={activeLayer.id}
-              className="flex flex-col gap-3"
-              style={{ animation: "slide-in-right 0.2s ease" }}
-            >
-              <div className="flex items-center gap-2">
-                <span
-                  className="w-3 h-3 rounded-full shrink-0"
-                  style={{ background: activeLayer.color }}
-                />
-                <h3 className="font-semibold text-white text-lg">{activeLayer.label}</h3>
-              </div>
-              <p className="text-sm text-zinc-400 leading-relaxed">{activeLayer.description}</p>
-              <div className="flex flex-col gap-2 pt-1">
-                <span className="text-xs text-zinc-600 font-mono uppercase tracking-wide">Examples</span>
-                <div className="flex flex-wrap gap-2">
-                  {activeLayer.examples.map((ex) => (
-                    <span
-                      key={ex}
-                      className="text-xs px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-mono"
-                    >
-                      {ex}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3 text-zinc-500">
-              <h3 className="font-semibold text-zinc-300 text-lg">The Dependency Rule</h3>
-              <p className="text-sm leading-relaxed">
-                Source-code dependencies must always point <span className="text-violet-400">inward</span>.
-                Nothing in an inner circle can know about something in an outer circle — not a function name,
-                class, variable, or framework type.
-              </p>
-              <p className="text-sm leading-relaxed">
-                Click any ring to explore its responsibility.
-              </p>
-              <div className="grid grid-cols-2 gap-2 pt-2">
-                {LAYERS.map((l) => (
-                  <button
-                    key={l.id}
-                    onClick={() => setActive(l.id)}
-                    className="flex items-center gap-2 p-2 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors text-left"
+            {/* The probe: an arrow between two chosen rings */}
+            {probe && (() => {
+              const [from, to] = probe;
+              const rFrom = radiusAt(from) - RING_W / 2;
+              const rTo = radiusAt(to) - RING_W / 2;
+              const hue: HueName = legal ? "success" : "danger";
+              // Drawn on the left side so it does not collide with the rule arrow
+              return (
+                <g>
+                  <path
+                    d={`M ${C - rFrom} ${C} L ${C - rTo} ${C}`}
+                    stroke={HUE[hue].line}
+                    strokeWidth={STROKE.thick}
+                    markerEnd={`url(#viz-arrow-${hue})`}
+                    style={{ filter: `drop-shadow(0 0 6px ${HUE[hue].glow})` }}
+                  />
+                  <VizText
+                    x={C - (rFrom + rTo) / 2} y={C - 16}
+                    size={TYPE.small} weight={700} hue={hue} mono
                   >
-                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: l.color }} />
-                    <span className="text-xs text-zinc-400">{l.label}</span>
+                    {legal ? "✓ inward" : "✗ outward"}
+                  </VizText>
+                </g>
+              );
+            })()}
+          </VizSvg>
+        </VizStage>
+
+        {/* Detail + the dependency probe */}
+        <div className="flex-1 min-w-0 flex flex-col gap-3 w-full">
+          <VizDetail
+            title={activeLayer?.label}
+            hue={activeLayer?.hue ?? "primary"}
+            onClose={() => setActive(null)}
+            empty="Click a ring to see what belongs in it."
+          >
+            {activeLayer && (
+              <>
+                <p className="text-[13px] text-zinc-300 leading-relaxed">{activeLayer.description}</p>
+                <VizField label="typically contains">
+                  <div className="flex flex-wrap gap-1.5">
+                    {activeLayer.examples.map((e) => (
+                      <VizChip key={e} hue={activeLayer.hue}>{e}</VizChip>
+                    ))}
+                  </div>
+                </VizField>
+                <VizField label="may depend on">
+                  {activeIdx === LAYERS.length - 1 ? (
+                    <span className="text-zinc-500">nothing — this is the centre</span>
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5">
+                      {LAYERS.slice(activeIdx + 1).map((l) => (
+                        <VizChip key={l.id} hue="success">{l.label}</VizChip>
+                      ))}
+                    </div>
+                  )}
+                </VizField>
+                {activeIdx > 0 && (
+                  <VizField label="must never name">
+                    <div className="flex flex-wrap gap-1.5">
+                      {LAYERS.slice(0, activeIdx).map((l) => (
+                        <VizChip key={l.id} hue="danger">{l.label}</VizChip>
+                      ))}
+                    </div>
+                  </VizField>
+                )}
+              </>
+            )}
+          </VizDetail>
+
+          {/* Try a dependency — the rule is easier to feel than to read */}
+          <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/30 px-4 py-3 flex flex-col gap-2">
+            <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">
+              test a dependency
+            </span>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { from: 1, to: 2, label: "Adapter → Use Case" },
+                { from: 2, to: 3, label: "Use Case → Entity" },
+                { from: 2, to: 1, label: "Use Case → Adapter" },
+                { from: 3, to: 0, label: "Entity → Framework" },
+              ].map((d) => {
+                const on = probe?.[0] === d.from && probe?.[1] === d.to;
+                const ok = d.to > d.from;
+                return (
+                  <button
+                    key={d.label}
+                    type="button"
+                    onClick={() => tryDependency(d.from, d.to)}
+                    aria-pressed={on}
+                    className={`rounded-lg border px-2.5 py-1.5 text-left text-[12px] font-mono transition-colors
+                      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/70
+                      ${on
+                        ? ok ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-200"
+                             : "border-red-500/60 bg-red-500/15 text-red-200"
+                        : "border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"}`}
+                  >
+                    {d.label}
                   </button>
-                ))}
-              </div>
+                );
+              })}
             </div>
-          )}
-          {activeLayer && (
-            <button
-              onClick={() => setActive(null)}
-              className="self-start text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
-            >
-              ← Back to overview
-            </button>
-          )}
+          </div>
         </div>
       </div>
 
-      <p className="text-xs text-zinc-600 text-center">
-        Click any concentric ring to explore its role and responsibilities.
-      </p>
-    </div>
+      <VizControls>
+        <VizSpacer />
+        <VizButton variant="ghost" onClick={() => { setActive(null); setProbe(null); }}>
+          ↺ Reset
+        </VizButton>
+      </VizControls>
+
+      <VizHint>
+        Every arrow that points outward is a future refactor. Invert it with an interface the
+        inner layer owns and the outer layer implements.
+      </VizHint>
+    </VizFrame>
   );
 }

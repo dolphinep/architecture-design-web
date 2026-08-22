@@ -137,7 +137,10 @@ function StepContent({ content, htmlMap, stepId, lang }: {
 }
 
 export function LabView({ lab, htmlMap }: { lab: LessonLab; htmlMap: Record<string, string> }) {
-  const [lang, setLang] = useState<LabLang>("typescript");
+  // Only offer language tracks the lab actually provides content for
+  const available = LANGS.filter((l) => lab.steps.some((s) => s.perLang?.[l.value]));
+  const tracks = available.length > 0 ? available : LANGS;
+  const [lang, setLang] = useState<LabLang>(tracks[0].value);
 
   return (
     <div className="flex flex-col gap-6">
@@ -147,7 +150,7 @@ export function LabView({ lab, htmlMap }: { lab: LessonLab; htmlMap: Record<stri
       {/* Prereqs + language picker */}
       <div className="flex flex-col sm:flex-row gap-4">
         <div className="flex-1 rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
-          <p className="text-[10px] font-mono text-zinc-600 uppercase tracking-widest mb-2">you'll need</p>
+          <p className="text-[10px] font-mono text-zinc-600 uppercase tracking-widest mb-2">you&apos;ll need</p>
           <ul className="flex flex-col gap-1">
             {lab.prerequisites.map((p, i) => (
               <li key={i} className="flex items-start gap-2 text-sm text-zinc-400">
@@ -157,10 +160,11 @@ export function LabView({ lab, htmlMap }: { lab: LessonLab; htmlMap: Record<stri
             ))}
           </ul>
         </div>
+        {tracks.length > 1 && (
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4 sm:w-52">
           <p className="text-[10px] font-mono text-zinc-600 uppercase tracking-widest mb-2">your language</p>
           <div className="flex sm:flex-col gap-1.5">
-            {LANGS.map((l) => (
+            {tracks.map((l) => (
               <button
                 key={l.value}
                 onClick={() => setLang(l.value)}
@@ -175,6 +179,7 @@ export function LabView({ lab, htmlMap }: { lab: LessonLab; htmlMap: Record<stri
             ))}
           </div>
         </div>
+        )}
       </div>
 
       {/* Steps */}

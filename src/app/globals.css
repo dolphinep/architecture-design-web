@@ -48,3 +48,41 @@ body {
 .animate-slide-in {
   animation: slide-in-right 0.25s ease-out;
 }
+
+/* ── Interactive visualizations ──────────────────────────────────────────────
+   SVG nodes are focusable <g> elements. `outline` renders inconsistently on SVG
+   across engines, so focus is drawn as a filter-based ring instead. */
+.viz-node-interactive:focus-visible {
+  filter: drop-shadow(0 0 0 2px #8b5cf6) drop-shadow(0 0 6px rgba(139, 92, 246, 0.8));
+}
+
+.viz-node-interactive rect,
+.viz-node-interactive circle {
+  transition: stroke 220ms cubic-bezier(0.16, 1, 0.3, 1),
+              stroke-width 220ms cubic-bezier(0.16, 1, 0.3, 1),
+              fill 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.viz-node-interactive:hover rect {
+  stroke-opacity: 1;
+}
+
+@keyframes viz-dash {
+  to { stroke-dashoffset: -18; }
+}
+
+/* Traffic direction on an idle edge — subtle, and only when motion is welcome. */
+.viz-edge-flowing {
+  stroke-dasharray: 5 4;
+  animation: viz-dash 900ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viz-edge-flowing,
+  .animate-slide-in,
+  .viz-node-interactive rect,
+  .viz-node-interactive circle {
+    animation: none !important;
+    transition: none !important;
+  }
+}
