@@ -590,7 +590,7 @@ export const principleRegistry: Principle[] = [
     ],
     realWorld: [
       { company: "AWS", usage: "ALB handles HTTPS termination and path-based routing for millions of apps" },
-      { company: "Cloudflare", usage: "Anycast routing + load balancing across 300+ PoPs globally" },
+      { company: "Cloudflare", usage: "Anycast routing + load balancing across 330+ cities globally" },
     ],
     related: ["api-gateway", "service-mesh", "kubernetes", "cdn"],
     tags: ["l4", "l7", "round-robin", "nginx", "haproxy", "high-availability"],
@@ -1619,7 +1619,7 @@ export const principleRegistry: Principle[] = [
       { pro: "Absorbs traffic spikes at the edge", con: "Costs scale with bandwidth egress" },
     ],
     realWorld: [
-      { company: "Cloudflare", usage: "330+ PoPs serving 20%+ of all web traffic" },
+      { company: "Cloudflare", usage: "330+ cities serving 20%+ of all web traffic" },
       { company: "Netflix", usage: "Open Connect CDN delivers 99%+ of streaming traffic from ISP-embedded appliances" },
     ],
     related: ["load-balancing", "dns", "cloud-native"],

@@ -45,9 +45,9 @@ export const aiInfraLesson: Lesson = {
         {
           kind: "stats",
           items: [
-            { value: "$0.002", label: "GPT-4o per 1K output tokens", accent: "zinc" },
-            { value: "$0.0004", label: "self-hosted llama3 per 1K", accent: "emerald" },
-            { value: "5×", label: "cost reduction self-hosted", accent: "amber" },
+            { value: "$1–15", label: "frontier API per 1M output tokens", accent: "zinc" },
+            { value: "$0.20–0.60", label: "self-hosted 8B per 1M output tokens", accent: "emerald" },
+            { value: "10–20×", label: "cost reduction at steady load", accent: "amber" },
           ],
         },
       ],
@@ -121,7 +121,7 @@ export const aiInfraLesson: Lesson = {
               accent: "emerald",
               points: [
                 "llama3.2:3b → 4 GB VRAM",
-                "llama3.1:8b → 8–10 GB VRAM",
+                "llama3.1:8b, mistral:7b → 8–10 GB VRAM",
                 "RTX 3080/4070 (10–12 GB) sufficient",
                 "~60–120 tokens/sec",
                 "Best for: chat, classification, summarization",
@@ -131,7 +131,7 @@ export const aiInfraLesson: Lesson = {
               title: "Medium (13B–34B)",
               accent: "cyan",
               points: [
-                "mistral:7b, codestral:22b",
+                "codestral:22b, qwen2.5:32b, gemma3:27b",
                 "16–24 GB VRAM needed",
                 "RTX 4090 (24 GB) or A10G",
                 "~20–50 tokens/sec",
@@ -142,7 +142,7 @@ export const aiInfraLesson: Lesson = {
               title: "Large (70B+)",
               accent: "violet",
               points: [
-                "llama3.1:70b → 40–48 GB VRAM",
+                "llama3.3:70b → 40–48 GB VRAM",
                 "A100 (40/80 GB) or 2×A10G",
                 "~8–15 tokens/sec",
                 "Tensor parallel across GPUs",

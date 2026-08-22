@@ -58,7 +58,7 @@ export function SyncCouplingViz() {
       const outSpeed = ph === "slow" ? 0.035 : 0.18;
       const backSpeed = ph === "slow" ? 0.06 : 0.2;
 
-      let next: Dot[] = [];
+      const next: Dot[] = [];
       for (const d of dotsRef.current) {
         if (d.dir === "out") {
           const p = d.p + outSpeed;

@@ -220,7 +220,7 @@ export function VectorSearchViz() {
           {queryVisible && (
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2">
               <div className="font-mono text-[9px] text-zinc-600 mb-0.5">query</div>
-              <div className="font-mono text-[10px] text-zinc-300">"{q.label}"</div>
+              <div className="font-mono text-[10px] text-zinc-300">&quot;{q.label}&quot;</div>
             </div>
           )}
         </div>

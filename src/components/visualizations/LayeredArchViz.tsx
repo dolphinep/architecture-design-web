@@ -1,5 +1,12 @@
 "use client";
 import { useState, useRef, useEffect, useCallback } from "react";
+import {
+  VizFrame, VizStage, VizHint, VizButton, VizSpacer,
+  VizStatus, VizStats, VizLegend, VizDetail, VizField, VizChip,
+  VizSvg, VizText, VizPacket,
+  useOnScreen, useReducedMotion,
+  HUE, TYPE, STROKE, type HueName,
+} from "./_shared";
 
 type LayerId = "presentation" | "business" | "persistence" | "database";
 type Mode = "normal" | "sinkhole";
@@ -8,435 +15,321 @@ interface Layer {
   id: LayerId;
   label: string;
   sublabel: string;
+  hue: HueName;
   examples: string[];
   desc: string;
-  color: string;
-  dim: string;
-  border: string;
+  /** What this layer contributes on a plain read-through request */
+  onRead: string;
+  /** What it contributes when the request is a pass-through (the sinkhole) */
+  onSinkhole: string;
 }
 
 const LAYERS: Layer[] = [
   {
     id: "presentation",
     label: "Presentation",
-    sublabel: "Controller · API · UI",
-    examples: ["HTTP Controller", "REST endpoint", "GraphQL resolver", "React page"],
-    desc: "Receives requests from clients and returns responses. Handles input validation and response formatting. Knows nothing about business rules or data access.",
-    color: "#4f46e5", dim: "#1e1b4b", border: "#818cf8",
+    sublabel: "controller · API · UI",
+    hue: "info",
+    examples: ["HTTP Controller", "REST endpoint", "GraphQL resolver"],
+    desc: "Receives the request, validates shape, formats the response. Knows nothing about business rules or storage.",
+    onRead: "parse + validate request",
+    onSinkhole: "parse request",
   },
   {
     id: "business",
     label: "Business Logic",
-    sublabel: "Service · Use Case · Domain",
-    examples: ["OrderService", "UserService", "PricingEngine", "AuthService"],
-    desc: "The heart of the application. Contains all business rules, validations, and workflows. Must not depend on HTTP, databases, or UI frameworks.",
-    color: "#7c3aed", dim: "#3b0764", border: "#a78bfa",
+    sublabel: "service · use case · domain",
+    hue: "primary",
+    examples: ["OrderService", "PricingEngine", "AuthService"],
+    desc: "Every business rule, validation and workflow lives here. Must not depend on HTTP, SQL, or any UI framework.",
+    onRead: "apply pricing + entitlement rules",
+    onSinkhole: "— nothing, just forwards the call",
   },
   {
     id: "persistence",
     label: "Persistence",
-    sublabel: "Repository · DAO · ORM",
-    examples: ["UserRepository", "OrderDAO", "Prisma ORM", "SQLAlchemy"],
-    desc: "Abstracts data storage. Translates between domain objects and database rows. The business layer calls an interface — it never sees SQL directly.",
-    color: "#0891b2", dim: "#082f49", border: "#22d3ee",
+    sublabel: "repository · DAO · ORM",
+    hue: "warning",
+    examples: ["UserRepository", "Prisma", "SQLAlchemy"],
+    desc: "Translates domain objects to rows and back. The layer above calls an interface and never sees SQL.",
+    onRead: "map domain object ↔ row",
+    onSinkhole: "— nothing, just forwards the call",
   },
   {
     id: "database",
     label: "Database",
-    sublabel: "SQL · NoSQL · Cache",
-    examples: ["PostgreSQL", "MongoDB", "Redis", "Elasticsearch"],
-    desc: "Raw storage. Purely infrastructure — no application logic lives here. The persistence layer translates to and from this layer.",
-    color: "#059669", dim: "#052e16", border: "#34d399",
+    sublabel: "SQL · NoSQL · cache",
+    hue: "success",
+    examples: ["PostgreSQL", "MongoDB", "Redis"],
+    desc: "Raw storage. Pure infrastructure — no application logic belongs here.",
+    onRead: "SELECT … WHERE id = ?",
+    onSinkhole: "SELECT … WHERE id = ?",
   },
 ];
 
-// Animation steps: 0=idle, 1–4=request down, 5–8=response up, 9=done
-const STEP_LAYERS: (LayerId | null)[] = [
-  null,
+/** Down through every layer, then back up. */
+const PATH: LayerId[] = [
   "presentation", "business", "persistence", "database",
-  "database",     "persistence", "business", "presentation",
-  null,
+  "persistence", "business", "presentation",
 ];
-const STEP_RETURNING = [false, false, false, false, false, true, true, true, true, false];
+/** Index in PATH at which the response starts travelling back up. */
+const TURN = 3;
 
 const LH = 62;
-const GAP = 10;
-const LW = 236;
-const OFFSET_Y = 48;
+const GAP = 14;
+const W = 470;
+const LW = 320;
+const LX = 58;
+const TOP = 30;
+const H = TOP + LAYERS.length * (LH + GAP) + 20;
+
+const layerY = (i: number) => TOP + i * (LH + GAP);
+const indexOf = (id: LayerId) => LAYERS.findIndex((l) => l.id === id);
 
 export function LayeredArchViz() {
-  const [active, setActive] = useState<LayerId | null>(null);
-  const [step, setStep] = useState(0);
-  const [animating, setAnimating] = useState(false);
   const [mode, setMode] = useState<Mode>("normal");
-  const [showResult, setShowResult] = useState(false);
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const [active, setActive] = useState<LayerId | null>(null);
+  /** -1 = idle; otherwise the index into PATH the request has reached. */
+  const [at, setAt] = useState(-1);
+  const [running, setRunning] = useState(false);
+  const [done, setDone] = useState(false);
 
+  const { ref: hostRef } = useOnScreen<HTMLDivElement>();
+  const reduced = useReducedMotion();
+
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const clearTimers = useCallback(() => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
   }, []);
+  useEffect(() => clearTimers, [clearTimers]);
 
-  useEffect(() => () => clearTimers(), [clearTimers]);
-
-  function layerY(idx: number) {
-    return OFFSET_Y + idx * (LH + GAP);
-  }
-
-  // Packet Y: centre of whichever layer is active (or null)
-  function packetY(s: number): number | null {
-    const layerId = STEP_LAYERS[s];
-    if (!layerId) return null;
-    const idx = LAYERS.findIndex(l => l.id === layerId);
-    return layerY(idx) + LH / 2;
-  }
-
-  function sendRequest() {
-    if (animating) return;
+  const send = useCallback(() => {
     clearTimers();
-    setAnimating(true);
-    setShowResult(false);
-    setStep(0);
+    setDone(false);
     setActive(null);
 
-    // In sinkhole mode the business step is much shorter (just a flash, 200ms vs 600ms)
-    const normalStep = 600;
-    const sinkholeBusinessStep = 200;
+    if (reduced) { setAt(PATH.length - 1); setDone(true); return; }
 
-    let t = 0;
+    setRunning(true);
+    setAt(-1);
 
-    // Build timing schedule
-    const schedule: Array<{ delay: number; s: number }> = [];
-
-    if (mode === "normal") {
-      // Steps 1–8 equally spaced
-      for (let s = 1; s <= 8; s++) {
-        schedule.push({ delay: t, s });
-        t += normalStep;
-      }
-    } else {
-      // Sinkhole: business steps (2 and 7) are fast flashes
-      for (let s = 1; s <= 8; s++) {
-        schedule.push({ delay: t, s });
-        const isBusiness = STEP_LAYERS[s] === "business";
-        t += isBusiness ? sinkholeBusinessStep : normalStep;
-      }
-    }
-
-    schedule.forEach(({ delay, s }) => {
-      const id = setTimeout(() => {
-        setStep(s);
-        setActive(STEP_LAYERS[s]);
-      }, delay);
-      timers.current.push(id);
+    let clock = 260;
+    PATH.forEach((id, i) => {
+      // A pass-through layer is quick — that speed *is* the sinkhole smell.
+      const passThrough =
+        mode === "sinkhole" && (id === "business" || id === "persistence");
+      timers.current.push(setTimeout(() => setAt(i), clock));
+      clock += passThrough ? 200 : 620;
     });
 
-    const doneId = setTimeout(() => {
-      setStep(9);
-      setActive(null);
-      setAnimating(false);
-      if (mode === "sinkhole") setShowResult(true);
-    }, t);
-    timers.current.push(doneId);
-  }
+    timers.current.push(setTimeout(() => {
+      setRunning(false);
+      setDone(true);
+    }, clock));
+  }, [clearTimers, mode, reduced]);
 
   function reset() {
     clearTimers();
-    setAnimating(false);
-    setStep(0);
+    setAt(-1);
+    setRunning(false);
+    setDone(false);
     setActive(null);
-    setShowResult(false);
   }
 
-  const returning = STEP_RETURNING[step];
-  const pY = packetY(step);
-  const totalH = LAYERS.length * LH + (LAYERS.length - 1) * GAP;
-  const svgH = OFFSET_Y + totalH + 12;
-  const svgW = LW + 44; // 20px left margin for packet lane, 24px right
+  const currentId = at >= 0 && at < PATH.length ? PATH[at] : null;
+  const returning = at > TURN;
+  const activeLayer = active ? LAYERS[indexOf(active)] : null;
 
-  const activeLayer = active ? LAYERS.find(l => l.id === active) : null;
+  // Layers that added nothing on this trip
+  const passThroughCount = mode === "sinkhole" ? 2 : 0;
+  const usefulLayers = LAYERS.length - passThroughCount;
 
   return (
-    <div className="flex flex-col gap-5">
+    <VizFrame>
+      <VizStatus
+        hue={done && mode === "sinkhole" ? "warning" : done ? "success" : running ? "primary" : "neutral"}
+        label={
+          done && mode === "sinkhole" ? "SINKHOLE"
+          : done ? "200 OK"
+          : currentId ? `${returning ? "↑" : "↓"} ${LAYERS[indexOf(currentId)].label.toUpperCase()}`
+          : "READY"
+        }
+        pulse={running}
+      >
+        {done && mode === "sinkhole"
+          ? "Two of four layers added nothing — they only forwarded the call. That is the sinkhole anti-pattern: the cost of the indirection with none of the benefit."
+          : done
+            ? "Each layer did real work on the way down and on the way back up."
+            : currentId
+              ? (mode === "sinkhole" ? LAYERS[indexOf(currentId)].onSinkhole : LAYERS[indexOf(currentId)].onRead)
+              : "Send a request and watch it travel down the stack and back. Each layer may only call the one directly below it."}
+      </VizStatus>
 
-      {/* Mode toggle */}
-      <div className="flex flex-wrap gap-2 items-center">
-        <span className="text-xs text-zinc-500">Visualise:</span>
-        {([
-          { value: "normal",   label: "Normal flow" },
-          { value: "sinkhole", label: "Sinkhole anti-pattern" },
-        ] as const).map(({ value, label }) => (
-          <button
-            key={value}
-            onClick={() => { setMode(value); reset(); }}
-            className={`px-3 py-1.5 rounded-lg text-sm transition-colors border ${
-              mode === value
-                ? "bg-zinc-700 border-zinc-500 text-white"
-                : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+      {/* Scenario */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="inline-flex rounded-xl overflow-hidden border border-zinc-800">
+          {([
+            { v: "normal" as Mode, label: "Every layer earns its keep" },
+            { v: "sinkhole" as Mode, label: "Sinkhole anti-pattern" },
+          ]).map(({ v, label }) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => { setMode(v); reset(); }}
+              aria-pressed={mode === v}
+              className={`px-3.5 py-1.5 text-[13px] font-medium transition-colors
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/70
+                ${mode === v
+                  ? v === "sinkhole" ? "bg-amber-500/20 text-amber-200" : "bg-emerald-500/20 text-emerald-200"
+                  : "bg-zinc-900/60 text-zinc-400 hover:text-zinc-200"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <VizSpacer />
+        <VizButton variant="primary" onClick={send} disabled={running}>
+          {running ? "⏳ In flight…" : "▶ Send request"}
+        </VizButton>
+        <VizButton variant="ghost" onClick={reset}>↺ Reset</VizButton>
       </div>
 
-      {/* Main layout */}
-      <div className="flex flex-col lg:flex-row gap-6 items-start">
+      <div className="flex flex-col lg:flex-row gap-4 items-start">
+        <div ref={hostRef} className="w-full lg:flex-1 min-w-0">
+          <VizStage>
+            <VizSvg w={W} h={H} label="Four stacked layers with a request travelling down and a response returning up">
+              {/* Allowed call direction rail */}
+              <VizText x={W / 2} y={12} size={TYPE.micro} anchor="middle" mono fill="#3f3f46">
+                a layer may only call the one directly below it
+              </VizText>
 
-        {/* SVG stack */}
-        <div className="shrink-0">
-          <svg width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`}>
-            <defs>
-              <marker id="la-arr-d" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto">
-                <polygon points="0 0, 6 2.5, 0 5" fill="#6366f1" />
-              </marker>
-              <marker id="la-arr-u" markerWidth="6" markerHeight="5" refX="0" refY="2.5" orient="auto-start-reverse">
-                <polygon points="0 0, 6 2.5, 0 5" fill="#34d399" />
-              </marker>
-            </defs>
+              {LAYERS.map((layer, i) => {
+                const y = layerY(i);
+                const isHere = currentId === layer.id;
+                const isActive = active === layer.id;
+                const passThrough = mode === "sinkhole" && (layer.id === "business" || layer.id === "persistence");
+                const hue: HueName = isHere ? (passThrough ? "warning" : layer.hue) : layer.hue;
+                const c = HUE[hue];
+                const touched = at >= 0 && PATH.slice(0, at + 1).includes(layer.id);
 
-            {/* Client node */}
-            <rect x={20} y={4} width={LW} height={32} rx={7}
-              fill="#18181b" stroke="#3f3f46" strokeWidth="1" />
-            <text x={20 + LW / 2} y={16} textAnchor="middle" fill="#e4e4e7"
-              fontSize="10" fontWeight="700" fontFamily="sans-serif">Client</text>
-            <text x={20 + LW / 2} y={30} textAnchor="middle" fill="#71717a"
-              fontSize="8" fontFamily="sans-serif">browser / app</text>
-
-            {/* Arrow client → first layer */}
-            <line x1={20 + LW / 2} y1={36} x2={20 + LW / 2} y2={OFFSET_Y - 2}
-              stroke="#4f46e5" strokeWidth="1.5" markerEnd="url(#la-arr-d)" />
-
-            {/* Layer boxes */}
-            {LAYERS.map((layer, i) => {
-              const y = layerY(i);
-              const isActive = active === layer.id;
-              const isDimmed = active !== null && !isActive;
-              const isSinkholeFlash = mode === "sinkhole" && isActive && layer.id === "business";
-
-              // red warning in sinkhole mode (active business layer or post-anim result)
-              const showSinkholeWarn = mode === "sinkhole" && layer.id === "business"
-                && (isSinkholeFlash || (showResult && !animating));
-
-              return (
-                <g key={layer.id} onClick={() => !animating && setActive(isActive ? null : layer.id)}
-                  style={{ cursor: animating ? "default" : "pointer" }}>
-                  <rect
-                    x={20} y={y} width={LW} height={LH} rx={9}
-                    fill={
-                      showSinkholeWarn ? "#1f0a0a"
-                      : isActive ? layer.dim
-                      : "#18181b"
-                    }
-                    stroke={
-                      showSinkholeWarn ? "#ef4444"
-                      : isActive ? layer.border
-                      : "#3f3f46"
-                    }
-                    strokeWidth={isActive || showSinkholeWarn ? 2 : 1}
-                    opacity={isDimmed ? 0.35 : 1}
-                    style={isActive && !showSinkholeWarn
-                      ? { filter: `drop-shadow(0 0 8px ${layer.color}50)` }
-                      : showSinkholeWarn
-                      ? { filter: "drop-shadow(0 0 8px #ef444450)" }
-                      : {}}
-                  />
-
-                  {/* Layer label */}
-                  <text x={36} y={y + 24} fill={
-                    showSinkholeWarn ? "#f87171"
-                    : isActive ? layer.border
-                    : "#e4e4e7"
-                  } fontSize="11" fontWeight="700" fontFamily="sans-serif">
-                    {layer.label}
-                  </text>
-                  <text x={36} y={y + 40} fill={
-                    showSinkholeWarn ? "#f87171"
-                    : isActive ? layer.border
-                    : "#71717a"
-                  } fontSize="9" fontFamily="sans-serif" opacity={0.85}>
-                    {layer.sublabel}
-                  </text>
-
-                  {/* Sinkhole "no logic" badge */}
-                  {showSinkholeWarn && (
-                    <g>
-                      <rect x={LW - 52} y={y + 14} width={56} height={18} rx={4}
-                        fill="#7f1d1d" stroke="#ef4444" strokeWidth="1" />
-                      <text x={LW - 24} y={y + 27} textAnchor="middle"
-                        fill="#fca5a5" fontSize="8.5" fontWeight="600" fontFamily="sans-serif">
-                        ⚠ no logic
-                      </text>
-                    </g>
-                  )}
-
-                  {/* Connector arrow to next layer */}
-                  {i < LAYERS.length - 1 && (
-                    <line
-                      x1={20 + LW / 2} y1={y + LH}
-                      x2={20 + LW / 2} y2={y + LH + GAP - 1}
-                      stroke={isActive ? layer.border : "#3f3f46"}
-                      strokeWidth="1.5"
-                      markerEnd="url(#la-arr-d)"
+                return (
+                  <g key={layer.id}>
+                    <rect
+                      x={LX} y={y} width={LW} height={LH} rx={10}
+                      fill={isHere || isActive ? "url(#viz-node-active)" : "url(#viz-node)"}
+                      stroke={c.line}
+                      strokeWidth={isHere ? STROKE.thick : isActive ? STROKE.base : STROKE.thin}
+                      strokeOpacity={touched || isActive || at < 0 ? 1 : 0.45}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`${layer.label}: ${layer.sublabel}`}
+                      aria-pressed={isActive}
+                      onClick={() => setActive(isActive ? null : layer.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setActive(isActive ? null : layer.id); }
+                      }}
+                      className="viz-node-interactive"
+                      style={{ cursor: "pointer", outline: "none" }}
                     />
+                    <VizText x={LX + 14} y={y + 22} size={TYPE.body} weight={600} anchor="start" fill={HUE.neutral.strong}>
+                      {layer.label}
+                    </VizText>
+                    <VizText x={LX + 14} y={y + 42} size={TYPE.micro} anchor="start" mono fill="#7c7c88">
+                      {layer.sublabel}
+                    </VizText>
+
+                    {/* Pass-through badge — the visible symptom of a sinkhole */}
+                    {passThrough && (
+                      <>
+                        <rect
+                          x={LX + LW - 108} y={y + LH / 2 - 11} width={94} height={22} rx={6}
+                          fill={HUE.warning.base} fillOpacity={0.18}
+                          stroke={HUE.warning.line} strokeWidth={STROKE.hairline}
+                        />
+                        <VizText x={LX + LW - 61} y={y + LH / 2} size={TYPE.micro} mono hue="warning">
+                          pass-through
+                        </VizText>
+                      </>
+                    )}
+
+                    {/* Vertical connector to the next layer down */}
+                    {i < LAYERS.length - 1 && (
+                      <line
+                        x1={LX + LW / 2} y1={y + LH} x2={LX + LW / 2} y2={y + LH + GAP}
+                        stroke={HUE.neutral.line} strokeWidth={STROKE.thin} strokeOpacity={0.7}
+                      />
+                    )}
+                  </g>
+                );
+              })}
+
+              {/* Request going down (left gutter) and response coming up (right gutter) */}
+              {currentId && (
+                <VizPacket
+                  x={returning ? LX + LW + 22 : LX - 22}
+                  y={layerY(indexOf(currentId)) + LH / 2}
+                  hue={returning ? "success" : "primary"}
+                  r={6}
+                  label={returning ? "response" : "request"}
+                />
+              )}
+
+              <VizText x={LX - 22} y={TOP - 14} size={TYPE.micro} mono fill="#4c1d95">↓ req</VizText>
+              <VizText x={LX + LW + 22} y={H - 8} size={TYPE.micro} mono fill="#065f46">↑ res</VizText>
+            </VizSvg>
+          </VizStage>
+        </div>
+
+        <div className="w-full lg:w-[300px] shrink-0 flex flex-col gap-3">
+          <VizDetail
+            title={activeLayer?.label}
+            hue={activeLayer?.hue ?? "primary"}
+            onClose={() => setActive(null)}
+            empty="Click a layer to see what belongs in it."
+          >
+            {activeLayer && (
+              <>
+                <p className="text-[13px] text-zinc-300 leading-relaxed">{activeLayer.desc}</p>
+                <VizField label="typical contents">
+                  <div className="flex flex-wrap gap-1.5">
+                    {activeLayer.examples.map((e) => (
+                      <VizChip key={e} hue={activeLayer.hue}>{e}</VizChip>
+                    ))}
+                  </div>
+                </VizField>
+                <VizField label="may call">
+                  {indexOf(activeLayer.id) === LAYERS.length - 1 ? (
+                    <span className="text-zinc-500">nothing below it</span>
+                  ) : (
+                    <VizChip hue="success">{LAYERS[indexOf(activeLayer.id) + 1].label}</VizChip>
                   )}
-                </g>
-              );
-            })}
-
-            {/* Animated packet dot — left lane */}
-            {pY !== null && (
-              <g>
-                <circle cx={10} cy={pY} r={5}
-                  fill={returning ? "#34d399" : "#818cf8"} />
-                <circle cx={10} cy={pY} r={9}
-                  fill={returning ? "#34d399" : "#818cf8"} opacity={0.2} />
-              </g>
+                </VizField>
+              </>
             )}
+          </VizDetail>
 
-            {/* Left lane direction labels */}
-            <text x={10} y={OFFSET_Y - 6} textAnchor="middle" fill="#6366f1"
-              fontSize="8" fontFamily="monospace">↓ req</text>
-            <text x={10} y={OFFSET_Y + totalH + 10} textAnchor="middle" fill="#34d399"
-              fontSize="8" fontFamily="monospace">↑ res</text>
-          </svg>
-        </div>
-
-        {/* Info panel */}
-        <div className="flex-1 flex flex-col gap-4 min-h-[260px]">
-          {activeLayer && !showResult ? (
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center gap-2">
-                <span className="w-3 h-3 rounded-full shrink-0"
-                  style={{ background: activeLayer.color }} />
-                <h3 className="font-semibold text-white">{activeLayer.label} layer</h3>
-              </div>
-              <p className="text-sm text-zinc-400 leading-relaxed">{activeLayer.desc}</p>
-              <div className="flex flex-col gap-2">
-                <span className="text-xs text-zinc-600 font-mono uppercase tracking-wide">
-                  Belongs here
-                </span>
-                <div className="flex flex-wrap gap-2">
-                  {activeLayer.examples.map(ex => (
-                    <span key={ex}
-                      className="text-xs px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-mono">
-                      {ex}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <button onClick={() => setActive(null)}
-                className="self-start text-xs text-zinc-600 hover:text-zinc-400 transition-colors">
-                ← back
-              </button>
-            </div>
-
-          ) : showResult ? (
-            <div className="flex flex-col gap-3">
-              <h3 className="font-semibold text-red-400 flex items-center gap-2">
-                <span>⚠</span> Sinkhole detected
-              </h3>
-              <p className="text-sm text-zinc-400 leading-relaxed">
-                The <span className="text-violet-300 font-medium">Business Logic layer</span> contains
-                no real logic — it just forwards every call directly to the Persistence layer.
-                This is the sinkhole anti-pattern.
-              </p>
-              <div className="rounded-xl border border-red-900/50 bg-red-950/20 p-3">
-                <pre className="text-xs text-red-300 font-mono leading-relaxed">{`// ⚠ sinkhole — no business logic
-class UserService {
-  getUser(id: string) {
-    return this.repo.findById(id); // just passes through
-  }
-  saveUser(user: User) {
-    return this.repo.save(user);   // no validation, no rules
-  }
-}`}</pre>
-              </div>
-              <p className="text-sm text-zinc-500 leading-relaxed">
-                If your business layer looks like this everywhere, either add real domain logic
-                or remove the layer and call persistence directly — dead layers add overhead with no benefit.
-              </p>
-              <button onClick={reset}
-                className="self-start text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
-                ← reset
-              </button>
-            </div>
-
-          ) : mode === "sinkhole" ? (
-            <div className="flex flex-col gap-4">
-              <div className="flex flex-col gap-2">
-                <h3 className="font-semibold text-red-400">Sinkhole anti-pattern</h3>
-                <p className="text-sm text-zinc-400 leading-relaxed">
-                  A "sinkhole" layer is one that adds no logic — every call passes straight through
-                  to the layer below with zero transformation, validation, or business rule enforcement.
-                </p>
-                <p className="text-sm text-zinc-400 leading-relaxed">
-                  In this demo, the Business Logic layer is hollow. Watch it flash red as each
-                  request speeds through without stopping.
-                </p>
-              </div>
-              <div className="flex flex-col gap-2">
-                <span className="text-xs text-zinc-600 font-mono uppercase tracking-wide">
-                  Click any layer to explore · Run animation to see the pattern
-                </span>
-                <div className="grid grid-cols-2 gap-2">
-                  {LAYERS.map(l => (
-                    <button key={l.id} onClick={() => setActive(l.id)}
-                      className="flex items-center gap-2 p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors text-left">
-                      <span className="w-2.5 h-2.5 rounded-full shrink-0"
-                        style={{ background: l.id === "business" && mode === "sinkhole" ? "#ef4444" : l.color }} />
-                      <span className="text-xs text-zinc-400">{l.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-          ) : (
-            <div className="flex flex-col gap-4">
-              <div className="flex flex-col gap-2">
-                <h3 className="font-semibold text-zinc-300">The Golden Rule</h3>
-                <p className="text-sm text-zinc-500 leading-relaxed">
-                  Each layer <span className="text-white">only calls the layer directly below it</span>.
-                  A request travels downward; a response returns upward.
-                  No layer skips another; no inner layer knows about the outer ones.
-                </p>
-              </div>
-              <div className="flex flex-col gap-2">
-                <span className="text-xs text-zinc-600 font-mono uppercase tracking-wide">
-                  Click any layer to explore
-                </span>
-                <div className="grid grid-cols-2 gap-2">
-                  {LAYERS.map(l => (
-                    <button key={l.id} onClick={() => setActive(l.id)}
-                      className="flex items-center gap-2 p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors text-left">
-                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: l.color }} />
-                      <span className="text-xs text-zinc-400">{l.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
+          <VizStats
+            items={[
+              { label: "layers traversed", value: `${Math.min(at + 1, PATH.length)}/${PATH.length}`, hue: "primary", meter: [Math.min(at + 1, PATH.length), PATH.length] },
+              { label: "layers doing real work", value: `${usefulLayers}/${LAYERS.length}`, hue: passThroughCount ? "warning" : "success", meter: [usefulLayers, LAYERS.length] },
+            ]}
+          />
         </div>
       </div>
 
-      {/* Controls */}
-      <div className="flex flex-wrap gap-3 items-center">
-        <button
-          onClick={sendRequest}
-          disabled={animating}
-          className="px-4 py-1.5 rounded-lg text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          {animating ? "⏳ In flight…" : "▶ Send request"}
-        </button>
-        <span className="text-xs text-zinc-600">
-          {mode === "sinkhole"
-            ? "Business layer flashes red — it adds no logic, just passes straight through."
-            : "Request flows down through each layer; response returns back up."}
-        </span>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <VizLegend
+          items={[
+            { hue: "primary", label: "request descending" },
+            { hue: "success", label: "response ascending" },
+            ...(mode === "sinkhole" ? [{ hue: "warning" as HueName, label: "adds nothing" }] : []),
+          ]}
+        />
+        <VizHint>
+          Layering only pays for itself when each layer has a reason to exist.
+        </VizHint>
       </div>
-
-    </div>
+    </VizFrame>
   );
 }

@@ -1,252 +1,378 @@
 "use client";
 import { useState, useRef, useEffect, useCallback } from "react";
+import {
+  VizFrame, VizStage, VizHint, VizControls, VizButton, VizSpacer,
+  VizStatus, VizStats, VizLegend, VizLog,
+  VizSvg, VizText, VizEdge, VizPacket, VizNode,
+  useOnScreen, useReducedMotion, useEventLog,
+  HUE, TYPE, STROKE, type HueName,
+} from "./_shared";
 
 type ServiceId = "users" | "orders" | "products";
-type AuthMode = "valid" | "invalid";
-type RequestState = "idle" | "auth-check" | "rate-check" | "routing" | "success" | "auth-fail" | "rate-fail";
 
-interface Request {
-  id: number;
+/** The request's position in the gateway pipeline. */
+type Stage = "idle" | "auth" | "rate" | "route" | "served" | "rejected-401" | "rejected-429";
+
+interface Route {
   method: string;
   path: string;
   service: ServiceId;
-  auth: AuthMode;
-  state: RequestState;
-  progress: number;
 }
 
-interface LogEntry { id: number; color: string; text: string; }
-
-const ROUTES: Array<{ method: string; path: string; service: ServiceId; label: string }> = [
-  { method: "GET",    path: "/api/users/me",       service: "users",    label: "GET /users/me" },
-  { method: "POST",   path: "/api/orders",          service: "orders",   label: "POST /orders" },
-  { method: "GET",    path: "/api/products",        service: "products", label: "GET /products" },
-  { method: "DELETE", path: "/api/orders/42",       service: "orders",   label: "DELETE /orders/42" },
-  { method: "PUT",    path: "/api/users/profile",   service: "users",    label: "PUT /users/profile" },
+const ROUTES: Route[] = [
+  { method: "GET",    path: "/api/users/me",     service: "users" },
+  { method: "POST",   path: "/api/orders",       service: "orders" },
+  { method: "GET",    path: "/api/products",     service: "products" },
+  { method: "DELETE", path: "/api/orders/42",    service: "orders" },
 ];
 
-const SERVICE_META: Record<ServiceId, { label: string; color: string; border: string; port: string }> = {
-  users:    { label: "User Service",    color: "#4f46e5", border: "#818cf8", port: ":3001" },
-  orders:   { label: "Order Service",   color: "#7c3aed", border: "#a78bfa", port: ":3002" },
-  products: { label: "Product Service", color: "#0891b2", border: "#22d3ee", port: ":3003" },
+const METHOD_HUE: Record<string, HueName> = {
+  GET: "success", POST: "info", PUT: "warning", DELETE: "danger",
 };
 
+const SERVICES: Array<{ id: ServiceId; label: string; port: string; hue: HueName }> = [
+  { id: "users",    label: "User Service",    port: ":3001", hue: "info" },
+  { id: "orders",   label: "Order Service",   port: ":3002", hue: "primary" },
+  { id: "products", label: "Product Service", port: ":3003", hue: "success" },
+];
+
 const RATE_LIMIT = 5;
-const STEP_MS = 600;
+const STEP_MS = 620;
+
+// ─── Layout ───────────────────────────────────────────────────────────────────
+const W = 720;
+const H = 300;
+const CLIENT_X = 16;
+const CLIENT_W = 92;
+const GATE_X = 190;
+const GATE_W = 190;
+const SVC_X = 512;
+const SVC_W = 190;
+const SVC_H = 52;
+const SVC_Y = [40, 122, 204];
+const MID = H / 2;
+
+/** The three gates, and where a packet sits while being checked by each. */
+const GATES = [
+  { id: "auth",  label: "Authenticate", detail: "verify bearer token" },
+  { id: "rate",  label: "Rate limit",   detail: `${RATE_LIMIT} req window` },
+  { id: "route", label: "Route",        detail: "match path → service" },
+] as const;
+
+const GATE_H = 40;
+const GATE_GAP = 12;
+const GATE_TOP = MID - (GATES.length * GATE_H + (GATES.length - 1) * GATE_GAP) / 2;
+const gateY = (i: number) => GATE_TOP + i * (GATE_H + GATE_GAP);
 
 export function APIGatewayViz() {
-  const [requests, setRequests] = useState<Request[]>([]);
-  const [authMode, setAuthMode] = useState<AuthMode>("valid");
-  const [rateLimitCount, setRateLimitCount] = useState(0);
-  const [activeReq, setActiveReq] = useState<Request | null>(null);
-  const [log, setLog] = useState<LogEntry[]>([]);
-  const [running, setRunning] = useState(false);
-  const reqId = useRef(0);
-  const logId = useRef(0);
+  const [stage, setStage] = useState<Stage>("idle");
+  const [route, setRoute] = useState<Route | null>(null);
+  const [hasToken, setHasToken] = useState(true);
+  const [used, setUsed] = useState(0);
+  const [counts, setCounts] = useState({ served: 0, blocked: 0 });
+
+  const { entries, push, clear: clearLog } = useEventLog(6);
+  const { ref: hostRef } = useOnScreen<HTMLDivElement>();
+  const reduced = useReducedMotion();
+
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const clearTimers = useCallback(() => {
+    timers.current.forEach(clearTimeout);
+    timers.current = [];
+  }, []);
+  useEffect(() => clearTimers, [clearTimers]);
 
-  function clearTimers() { timers.current.forEach(clearTimeout); timers.current = []; }
-  useEffect(() => () => clearTimers(), []);
+  const after = useCallback((ms: number, fn: () => void) => {
+    // Reduced motion collapses the walkthrough to its outcome.
+    if (reduced) { fn(); return; }
+    timers.current.push(setTimeout(fn, ms));
+  }, [reduced]);
 
-  function t(fn: () => void, ms: number) {
-    const id = setTimeout(fn, ms);
-    timers.current.push(id);
-  }
+  const inFlight = stage !== "idle" && stage !== "served"
+    && stage !== "rejected-401" && stage !== "rejected-429";
 
-  function addLog(color: string, text: string) {
-    setLog((prev) => [{ id: logId.current++, color, text }, ...prev].slice(0, 10));
-  }
+  const send = useCallback((r: Route) => {
+    clearTimers();
+    setRoute(r);
+    setStage("auth");
+    push(`→ ${r.method} ${r.path}`, METHOD_HUE[r.method] ?? "neutral");
 
-  const sendRequest = useCallback((routeIdx?: number) => {
-    const route = ROUTES[routeIdx ?? Math.floor(Math.random() * ROUTES.length)];
-    const id = reqId.current++;
-    const isRateLimited = rateLimitCount >= RATE_LIMIT;
-
-    const req: Request = {
-      id, method: route.method, path: route.path,
-      service: route.service, auth: authMode,
-      state: "idle", progress: 0,
-    };
-
-    setRequests((prev) => [...prev.slice(-6), req]);
-    setActiveReq(req);
-    setRunning(true);
-
-    // Phase 1: auth check
-    t(() => {
-      req.state = "auth-check";
-      setActiveReq({ ...req });
-      setRequests((prev) => prev.map((r) => r.id === id ? { ...r, state: "auth-check" } : r));
-      addLog("#818cf8", `→ Auth check: ${authMode === "valid" ? "Bearer token present" : "No token / invalid"}`);
-    }, STEP_MS * 0.5);
-
-    if (authMode === "invalid") {
-      t(() => {
-        setRequests((prev) => prev.map((r) => r.id === id ? { ...r, state: "auth-fail" } : r));
-        setActiveReq({ ...req, state: "auth-fail" });
-        addLog("#f87171", "✗ 401 Unauthorized — request rejected at gateway");
-        setRunning(false);
-      }, STEP_MS * 1.5);
+    if (!hasToken) {
+      after(STEP_MS, () => {
+        setStage("rejected-401");
+        setCounts((c) => ({ ...c, blocked: c.blocked + 1 }));
+        push("✗ 401 Unauthorized — stopped at the gateway", "danger");
+      });
       return;
     }
 
-    // Phase 2: rate limit
-    t(() => {
-      setRequests((prev) => prev.map((r) => r.id === id ? { ...r, state: "rate-check" } : r));
-      addLog("#f59e0b", `→ Rate limit: ${rateLimitCount + 1}/${RATE_LIMIT} requests`);
-      if (!isRateLimited) setRateLimitCount((c) => c + 1);
-    }, STEP_MS * 1.5);
+    after(STEP_MS, () => {
+      setStage("rate");
+      push("✓ Token valid", "success");
 
-    if (isRateLimited) {
-      t(() => {
-        setRequests((prev) => prev.map((r) => r.id === id ? { ...r, state: "rate-fail" } : r));
-        addLog("#f87171", "✗ 429 Too Many Requests — rate limit exceeded");
-        setRunning(false);
-      }, STEP_MS * 2.5);
-      return;
-    }
+      if (used >= RATE_LIMIT) {
+        after(STEP_MS, () => {
+          setStage("rejected-429");
+          setCounts((c) => ({ ...c, blocked: c.blocked + 1 }));
+          push(`✗ 429 Too Many Requests — ${used}/${RATE_LIMIT} used`, "danger");
+        });
+        return;
+      }
 
-    // Phase 3: routing
-    t(() => {
-      setRequests((prev) => prev.map((r) => r.id === id ? { ...r, state: "routing" } : r));
-      addLog("#22d3ee", `→ Routing ${route.method} ${route.path} → ${SERVICE_META[route.service].label}`);
-    }, STEP_MS * 2.5);
+      setUsed((n) => n + 1);
+      after(STEP_MS, () => {
+        setStage("route");
+        push(`→ ${SERVICES.find((s) => s.id === r.service)!.label}`, "info");
+        after(STEP_MS, () => {
+          setStage("served");
+          setCounts((c) => ({ ...c, served: c.served + 1 }));
+          push("✓ 200 OK", "success");
+        });
+      });
+    });
+  }, [after, clearTimers, hasToken, push, used]);
 
-    t(() => {
-      setRequests((prev) => prev.map((r) => r.id === id ? { ...r, state: "success" } : r));
-      addLog("#34d399", `✓ 200 OK ← ${SERVICE_META[route.service].label}`);
-      setRunning(false);
-    }, STEP_MS * 3.5);
-  }, [authMode, rateLimitCount]);
+  function reset() {
+    clearTimers();
+    setStage("idle");
+    setRoute(null);
+    setUsed(0);
+    setCounts({ served: 0, blocked: 0 });
+    clearLog();
+  }
 
-  const latestReq = requests[requests.length - 1];
-  const state = latestReq?.state ?? "idle";
+  /** Gate visual state: pending / checking / passed / failed. */
+  function gateState(i: number): "idle" | "active" | "ok" | "fail" {
+    const order: Stage[] = ["auth", "rate", "route"];
+    const at = order.indexOf(stage as Stage);
+    if (stage === "rejected-401") return i === 0 ? "fail" : "idle";
+    if (stage === "rejected-429") return i === 0 ? "ok" : i === 1 ? "fail" : "idle";
+    if (stage === "served") return "ok";
+    if (at < 0) return "idle";
+    if (i < at) return "ok";
+    if (i === at) return "active";
+    return "idle";
+  }
 
-  const gateSteps = [
-    { id: "auth",  label: "① Auth",       active: state === "auth-check",  fail: state === "auth-fail",  ok: ["rate-check","routing","success"].includes(state) },
-    { id: "rate",  label: "② Rate Limit", active: state === "rate-check",  fail: state === "rate-fail",  ok: ["routing","success"].includes(state) },
-    { id: "route", label: "③ Routing",    active: state === "routing",     fail: false,                  ok: state === "success" },
-  ];
+  const GATE_HUE = { idle: "neutral", active: "warning", ok: "success", fail: "danger" } as const;
+
+  const statusHue: HueName =
+    stage === "served" ? "success"
+    : stage === "rejected-401" || stage === "rejected-429" ? "danger"
+    : stage === "idle" ? "neutral" : "warning";
+
+  const statusLabel =
+    stage === "idle" ? "READY"
+    : stage === "served" ? "200 OK"
+    : stage === "rejected-401" ? "401"
+    : stage === "rejected-429" ? "429"
+    : stage.toUpperCase();
+
+  const statusText =
+    stage === "idle" ? "Send a request to walk it through the gateway."
+    : stage === "auth" ? "Checking the bearer token…"
+    : stage === "rate" ? "Counting against the rate-limit window…"
+    : stage === "route" ? "Matching the path to a backing service…"
+    : stage === "served" ? `Served by ${SERVICES.find((s) => s.id === route?.service)?.label}.`
+    : stage === "rejected-401" ? "No valid token — the backend was never reached."
+    : "Rate limit exhausted — the backend was never reached.";
+
+  // Where the request marker sits right now
+  const markerPos = (): [number, number] | null => {
+    if (stage === "idle") return null;
+    if (stage === "auth" || stage === "rejected-401") return [GATE_X - 8, gateY(0) + GATE_H / 2];
+    if (stage === "rate" || stage === "rejected-429") return [GATE_X - 8, gateY(1) + GATE_H / 2];
+    if (stage === "route") return [GATE_X - 8, gateY(2) + GATE_H / 2];
+    const i = SERVICES.findIndex((s) => s.id === route?.service);
+    return [SVC_X - 12, SVC_Y[i] + SVC_H / 2];
+  };
+  const marker = markerPos();
 
   return (
-    <div className="flex flex-col gap-5">
+    <VizFrame>
+      <VizStatus hue={statusHue} label={statusLabel} pulse={inFlight}>
+        {statusText}
+      </VizStatus>
 
-      {/* Settings */}
-      <div className="flex flex-wrap gap-3 items-center">
-        <div className="flex gap-2">
-          <span className="text-xs text-zinc-500 self-center">Auth:</span>
-          {(["valid","invalid"] as const).map((m) => (
-            <button key={m} onClick={() => setAuthMode(m)}
-              className={`px-3 py-1 rounded-lg text-xs border transition-colors ${
-                authMode === m ? "bg-zinc-700 border-zinc-500 text-white" : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700"}`}>
-              {m === "valid" ? "✓ Valid token" : "✗ No token"}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-2 ml-auto">
-          <span className="text-xs text-zinc-600 font-mono">rate: {rateLimitCount}/{RATE_LIMIT}</span>
-          <div className="w-20 bg-zinc-800 rounded-full h-1.5">
-            <div className="h-1.5 rounded-full bg-amber-500 transition-all"
-              style={{ width: `${(rateLimitCount / RATE_LIMIT) * 100}%` }} />
-          </div>
-          <button onClick={() => setRateLimitCount(0)}
-            className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors">reset</button>
-        </div>
-      </div>
-
-      {/* Diagram */}
-      <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 overflow-x-auto">
-        <div className="flex items-start gap-3 min-w-[540px]">
-
-          {/* Client */}
-          <div className="flex flex-col items-center gap-1 shrink-0">
-            <div className="rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-3 w-20 text-center">
-              <div className="text-xs font-semibold text-zinc-200">Client</div>
-              <div className="text-[10px] text-zinc-600 font-mono">browser</div>
-            </div>
-            <div className={`text-[10px] font-mono ${
-              state === "auth-fail" || state === "rate-fail" ? "text-red-400" :
-              state === "success" ? "text-emerald-400" : "text-zinc-700"
-            }`}>
-              {state === "auth-fail" ? "401" : state === "rate-fail" ? "429" : state === "success" ? "200 OK" : "…"}
-            </div>
-          </div>
-
-          {/* Arrow in */}
-          <div className="flex flex-col items-center justify-center mt-4 shrink-0">
-            <svg width={40} height={20}><defs><marker id="gw-arr" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0,6 2.5,0 5" fill="#6366f1"/></marker></defs>
-              <line x1={0} y1={10} x2={34} y2={10} stroke={state !== "idle" ? "#6366f1" : "#3f3f46"} strokeWidth="1.5" markerEnd="url(#gw-arr)"/>
-            </svg>
-            <span className="text-[8px] text-zinc-700 font-mono">HTTPS</span>
-          </div>
-
-          {/* API Gateway */}
-          <div className="flex flex-col gap-1.5 shrink-0 w-36">
-            <div className="text-[10px] text-indigo-400 font-mono text-center mb-0.5">API Gateway</div>
-            {gateSteps.map(({ id, label, active, fail, ok }) => (
-              <div key={id} className={`rounded-lg border px-2 py-1.5 text-[10px] font-mono transition-all ${
-                fail  ? "border-red-700 bg-red-950/50 text-red-400" :
-                active? "border-amber-600 bg-amber-950/30 text-amber-300 animate-pulse" :
-                ok    ? "border-emerald-800 bg-emerald-950/30 text-emerald-400" :
-                "border-zinc-800 bg-zinc-900/50 text-zinc-600"
-              }`}>
-                {label}
-                {fail && " ✗"}
-                {ok && !fail && " ✓"}
-              </div>
+      {/* Request credentials + quota */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">token</span>
+          <div className="inline-flex rounded-lg overflow-hidden border border-zinc-800">
+            {[true, false].map((v) => (
+              <button
+                key={String(v)}
+                type="button"
+                onClick={() => setHasToken(v)}
+                aria-pressed={hasToken === v}
+                className={`px-2.5 py-1 text-[12px] font-mono transition-colors
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/70
+                  ${hasToken === v
+                    ? v ? "bg-emerald-500/20 text-emerald-200" : "bg-red-500/20 text-red-200"
+                    : "bg-zinc-900/50 text-zinc-500 hover:text-zinc-300"}`}
+              >
+                {v ? "✓ valid" : "✗ missing"}
+              </button>
             ))}
           </div>
+        </div>
 
-          {/* Arrow out to services */}
-          <div className="flex flex-col items-center justify-center mt-10 shrink-0">
-            <svg width={40} height={20}><line x1={0} y1={10} x2={34} y2={10}
-              stroke={state === "routing" || state === "success" ? "#22d3ee" : "#3f3f46"}
-              strokeWidth="1.5" markerEnd="url(#gw-arr)"/></svg>
+        <div className="flex items-center gap-2 ml-auto">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">quota</span>
+          <span className="font-mono text-xs text-zinc-400 tabular-nums">{used}/{RATE_LIMIT}</span>
+          <div className="w-24 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-[width] duration-300 ${used >= RATE_LIMIT ? "bg-red-400" : "bg-amber-400"}`}
+              style={{ width: `${Math.min(100, (used / RATE_LIMIT) * 100)}%` }}
+            />
           </div>
+          <VizButton variant="ghost" onClick={() => { setUsed(0); push("↺ Rate window reset", "neutral"); }}>
+            reset window
+          </VizButton>
+        </div>
+      </div>
 
-          {/* Services */}
-          <div className="flex flex-col gap-2 shrink-0">
-            {(Object.entries(SERVICE_META) as [ServiceId, typeof SERVICE_META[ServiceId]][]).map(([id, meta]) => {
-              const isActive = latestReq?.service === id && (state === "routing" || state === "success");
+      <div ref={hostRef}>
+        <VizStage>
+          <VizSvg w={W} h={H} label="An API gateway checking authentication and rate limits before routing to one of three services">
+            {/* Client → gateway */}
+            <VizEdge
+              from={[CLIENT_X + CLIENT_W, MID]} to={[GATE_X - 8, MID]}
+              hue={stage === "idle" ? "neutral" : "primary"}
+              arrow active={inFlight}
+            />
+            <VizText x={(CLIENT_X + CLIENT_W + GATE_X) / 2} y={MID - 14} size={TYPE.micro} mono fill="#3f3f46">
+              HTTPS
+            </VizText>
+            <VizNode
+              x={CLIENT_X} y={MID - 26} w={CLIENT_W} h={52}
+              title="Client" sublabel="browser"
+              hue={stage === "served" ? "success" : stage.startsWith("rejected") ? "danger" : "neutral"}
+            />
+
+            {/* Gateway shell */}
+            <rect
+              x={GATE_X - 8} y={GATE_TOP - 26} width={GATE_W + 16} height={GATES.length * (GATE_H + GATE_GAP) + 34}
+              rx={14} fill="#101014" stroke={HUE.primary.base} strokeWidth={STROKE.thin} strokeOpacity={0.7}
+            />
+            <VizText x={GATE_X + GATE_W / 2} y={GATE_TOP - 12} size={TYPE.small} weight={700} hue="primary">
+              API Gateway
+            </VizText>
+
+            {/* The three gates, stacked in the order they run */}
+            {GATES.map((g, i) => {
+              const st = gateState(i);
+              const hue = GATE_HUE[st] as HueName;
               return (
-                <div key={id} className={`rounded-xl border px-3 py-2 w-36 transition-all ${
-                  isActive ? `bg-zinc-900` : "bg-zinc-900/40"
-                }`}
-                  style={{ borderColor: isActive ? meta.border : "#3f3f46" }}>
-                  <div className="text-[10px] font-semibold" style={{ color: isActive ? meta.border : "#71717a" }}>
-                    {meta.label}
-                  </div>
-                  <div className="text-[9px] text-zinc-700 font-mono">{meta.port}</div>
-                </div>
+                <g key={g.id}>
+                  <rect
+                    x={GATE_X} y={gateY(i)} width={GATE_W} height={GATE_H} rx={8}
+                    fill={st === "idle" ? "#17171a" : "url(#viz-node-active)"}
+                    stroke={HUE[hue].line}
+                    strokeWidth={st === "active" ? STROKE.base : STROKE.thin}
+                    strokeOpacity={st === "idle" ? 0.45 : 1}
+                  />
+                  <VizText
+                    x={GATE_X + 12} y={gateY(i) + 15} size={TYPE.small} weight={600} anchor="start"
+                    fill={st === "idle" ? "#6b6b76" : HUE[hue].text}
+                  >
+                    {`${i + 1}. ${g.label}`}
+                  </VizText>
+                  <VizText
+                    x={GATE_X + 12} y={gateY(i) + 29} size={TYPE.micro} anchor="start" mono
+                    fill={st === "idle" ? "#4b4b55" : "#8b8b96"}
+                  >
+                    {g.detail}
+                  </VizText>
+                  <VizText x={GATE_X + GATE_W - 12} y={gateY(i) + GATE_H / 2} size={TYPE.body} anchor="end" hue={hue} weight={700}>
+                    {st === "ok" ? "✓" : st === "fail" ? "✗" : st === "active" ? "…" : ""}
+                  </VizText>
+                </g>
               );
             })}
-          </div>
-        </div>
+
+            {/* Gateway → services, only the matched route lights up */}
+            {SERVICES.map((s, i) => {
+              const matched = route?.service === s.id && (stage === "route" || stage === "served");
+              return (
+                <VizEdge
+                  key={s.id}
+                  from={[GATE_X + GATE_W + 8, MID]}
+                  to={[SVC_X, SVC_Y[i] + SVC_H / 2]}
+                  hue={matched ? s.hue : "neutral"}
+                  arrow={matched}
+                  active={matched}
+                  dimmed={!matched}
+                  dashed={!matched}
+                />
+              );
+            })}
+
+            {/* Services */}
+            {SERVICES.map((s, i) => {
+              const matched = route?.service === s.id && (stage === "route" || stage === "served");
+              return (
+                <VizNode
+                  key={s.id}
+                  x={SVC_X} y={SVC_Y[i]} w={SVC_W} h={SVC_H}
+                  title={s.label} sublabel={s.port}
+                  hue={s.hue}
+                  active={matched}
+                  dimmed={!matched && stage !== "idle"}
+                />
+              );
+            })}
+
+            {/* The request itself */}
+            {marker && (
+              <VizPacket
+                x={marker[0]} y={marker[1]}
+                hue={stage.startsWith("rejected") ? "danger" : stage === "served" ? "success" : "primary"}
+                r={6}
+                // No label: it would sit on the gate text inside the gateway and
+                // on the node text at a service. The status banner names the
+                // stage and the log carries the request line.
+              />
+            )}
+          </VizSvg>
+        </VizStage>
       </div>
 
-      {/* Send buttons */}
-      <div className="flex flex-wrap gap-2">
-        {ROUTES.map((route, i) => (
-          <button key={i} onClick={() => sendRequest(i)} disabled={running}
-            className="px-2.5 py-1 rounded-lg text-[11px] font-mono text-zinc-300 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-            <span className={`${route.method === "GET" ? "text-emerald-400" : route.method === "POST" ? "text-indigo-400" : route.method === "DELETE" ? "text-red-400" : "text-amber-400"} mr-1`}>
-              {route.method}
+      <VizControls>
+        {ROUTES.map((r, i) => (
+          <VizButton key={i} onClick={() => send(r)} disabled={inFlight}>
+            <span className="font-mono" style={{ color: HUE[METHOD_HUE[r.method] ?? "neutral"].text }}>
+              {r.method}
             </span>
-            {route.path}
-          </button>
+            <span className="font-mono text-zinc-400">{r.path}</span>
+          </VizButton>
         ))}
-        <button onClick={() => sendRequest()} disabled={running}
-          className="px-3 py-1 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors disabled:opacity-40">
-          ▶ Random
-        </button>
-      </div>
+        <VizSpacer />
+        <VizButton variant="ghost" onClick={reset}>↺ Reset</VizButton>
+      </VizControls>
 
-      {/* Log */}
-      {log.length > 0 && (
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 flex flex-col gap-0.5 font-mono text-xs">
-          {log.map((e) => <div key={e.id} style={{ color: e.color }}>{e.text}</div>)}
-        </div>
-      )}
-    </div>
+      <VizStats
+        items={[
+          { label: "served (200)", value: counts.served, hue: "success" },
+          { label: "blocked at gateway", value: counts.blocked, hue: "danger" },
+          { label: "quota used", value: `${used}/${RATE_LIMIT}`, hue: used >= RATE_LIMIT ? "danger" : "warning", meter: [used, RATE_LIMIT] },
+        ]}
+      />
+
+      <VizLog entries={entries} rows={4} />
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <VizLegend
+          items={[
+            { hue: "success", label: "passed" },
+            { hue: "warning", label: "checking" },
+            { hue: "danger", label: "rejected" },
+          ]}
+        />
+        <VizHint>
+          Switch the token off, or exhaust the quota — the backing services never see the request.
+        </VizHint>
+      </div>
+    </VizFrame>
   );
 }

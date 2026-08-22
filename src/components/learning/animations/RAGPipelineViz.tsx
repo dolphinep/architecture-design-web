@@ -106,7 +106,7 @@ export function RAGPipelineViz() {
         {activeStage === 0 && (
           <div>
             <div className="font-mono text-[10px] text-zinc-500 mb-1">user query</div>
-            <div className="font-mono text-sm text-violet-300">"{STAGE_DEF[0].desc}"</div>
+            <div className="font-mono text-sm text-violet-300">&quot;{STAGE_DEF[0].desc}&quot;</div>
           </div>
         )}
         {activeStage === 1 && (

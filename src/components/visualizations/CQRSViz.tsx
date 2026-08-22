@@ -1,475 +1,361 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import {
+  VizFrame, VizStage, VizHint, VizControls, VizButton, VizSpacer,
+  VizStatus, VizStats, VizLegend, VizLog,
+  VizSvg, VizText, VizEdge, VizPacket, VizNode,
+  useOnScreen, useReducedMotion, useEventLog,
+  HUE, TYPE, STROKE,
+} from "./_shared";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+interface WriteRow { id: number; name: string; email: string }
+interface ReadRow { id: number; displayName: string; email: string; orders: number }
 
-interface WriteRecord {
-  id: number;
-  name: string;
-  email: string;
-  orderCount: number;
-  ts: string;
-}
-
-interface ReadRecord {
-  id: number;
-  displayName: string;
-  email: string;
-  orders: number;
-  status: string;
-}
-
-interface LogEntry {
-  id: number;
-  side: "command" | "event" | "query" | "info";
-  text: string;
-}
-
-type Phase =
-  | "idle"
-  | "command-flying"
-  | "command-writing"
-  | "event-emitting"
-  | "projection-updating"
-  | "done";
-
-// ─── Sample data ──────────────────────────────────────────────────────────────
-
-const INITIAL_WRITE: WriteRecord[] = [
-  { id: 1, name: "Alice Chen",  email: "alice@corp.com",  orderCount: 3, ts: "09:01" },
-  { id: 2, name: "Bob Smith",   email: "bob@corp.com",    orderCount: 1, ts: "09:05" },
+const SEED_WRITE: WriteRow[] = [
+  { id: 1, name: "Alice Chen", email: "alice@corp.com" },
+  { id: 2, name: "Bob Smith", email: "bob@corp.com" },
+];
+const SEED_READ: ReadRow[] = [
+  { id: 1, displayName: "Alice Chen", email: "alice@corp.com", orders: 3 },
+  { id: 2, displayName: "Bob Smith", email: "bob@corp.com", orders: 1 },
 ];
 
-const INITIAL_READ: ReadRecord[] = [
-  { id: 1, displayName: "Alice Chen",  email: "alice@corp.com",  orders: 3, status: "active" },
-  { id: 2, displayName: "Bob Smith",   email: "bob@corp.com",    orders: 1, status: "active" },
-];
+/** Where the command currently is. Queries are instantaneous by comparison. */
+type Phase = "idle" | "command" | "written" | "published" | "projecting" | "caught-up";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const PHASE_LABEL: Record<Phase, string> = {
+  idle: "IN SYNC",
+  command: "COMMAND IN FLIGHT",
+  written: "WRITE COMMITTED",
+  published: "EVENT PUBLISHED",
+  projecting: "PROJECTING",
+  "caught-up": "IN SYNC",
+};
 
-function now() {
-  return new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-let nextId = 3;
-
-// ─── Main component ───────────────────────────────────────────────────────────
+// ─── Layout ───────────────────────────────────────────────────────────────────
+const W = 740;
+const H = 250;
+const CLIENT_X = 14;
+const CLIENT_W = 96;
+const H_X = 176;      // handler column
+const H_W = 140;
+const DB_X = 402;     // store column
+const DB_W = 138;
+const PROJ_X = 580;
+const PROJ_W = 146;
+const TOP_Y = 24;     // write side
+const BOT_Y = 168;    // read side
+const NODE_H = 56;
+const BUS_Y = 104;
+const BUS_H = 40;
 
 export function CQRSViz() {
-  const [writeDB, setWriteDB]     = useState<WriteRecord[]>(INITIAL_WRITE);
-  const [readDB, setReadDB]       = useState<ReadRecord[]>(INITIAL_READ);
-  const [phase, setPhase]         = useState<Phase>("idle");
-  const [log, setLog]             = useState<LogEntry[]>([]);
-  const [lag, setLag]             = useState(1200);          // ms of eventual-consistency lag
-  const [pendingRead, setPendingRead] = useState<ReadRecord | null>(null);
-  const [queryResult, setQueryResult] = useState<ReadRecord | null>(null);
-  const [queryId, setQueryId]     = useState("1");
-  const [newName, setNewName]     = useState("Carol Jones");
-  const [newEmail, setNewEmail]   = useState("carol@corp.com");
-  const logId = useRef(0);
-  const timerRefs = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const [writeDb, setWriteDb] = useState<WriteRow[]>(SEED_WRITE);
+  const [readDb, setReadDb] = useState<ReadRow[]>(SEED_READ);
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [lagMs, setLagMs] = useState(1500);
+  const [queryResult, setQueryResult] = useState<{ id: number; row: ReadRow | null; stale: boolean } | null>(null);
+  const [staleReads, setStaleReads] = useState(0);
 
-  function addLog(side: LogEntry["side"], text: string) {
-    setLog((prev) => [{ id: logId.current++, side, text }, ...prev].slice(0, 10));
-  }
+  const { entries, push, clear: clearLog } = useEventLog(6);
+  const { ref: hostRef } = useOnScreen<HTMLDivElement>();
+  const reduced = useReducedMotion();
 
-  function clearTimers() {
-    timerRefs.current.forEach(clearTimeout);
-    timerRefs.current = [];
-  }
+  // Instance-scoped id counter. This used to be a module-level `let`, which
+  // leaked across component instances and page navigations.
+  const nextId = useRef(3);
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const clearTimers = useCallback(() => {
+    timers.current.forEach(clearTimeout);
+    timers.current = [];
+  }, []);
+  useEffect(() => clearTimers, [clearTimers]);
 
-  function t(fn: () => void, ms: number) {
-    const id = setTimeout(fn, ms);
-    timerRefs.current.push(id);
-  }
+  const at = useCallback((ms: number, fn: () => void) => {
+    if (reduced) { fn(); return; }
+    timers.current.push(setTimeout(fn, ms));
+  }, [reduced]);
 
-  // ── Send Command ──────────────────────────────────────────────────────────
+  const busy = phase !== "idle" && phase !== "caught-up";
 
-  function sendCommand() {
-    if (phase !== "idle") return;
-    const name  = newName.trim()  || "New User";
-    const email = newEmail.trim() || "new@example.com";
-    const id = nextId++;
-    const ts = now();
+  /** The window where the write store and read store disagree. */
+  const inconsistent = phase === "written" || phase === "published" || phase === "projecting";
 
-    setPhase("command-flying");
-    addLog("command", `CreateUserCommand { name: "${name}", email: "${email}" }`);
+  const sendCommand = useCallback(() => {
+    if (busy) return;
+    const id = nextId.current++;
+    const name = `User ${id}`;
+    const email = `user${id}@corp.com`;
 
-    t(() => {
-      setPhase("command-writing");
-      const record: WriteRecord = { id, name, email, orderCount: 0, ts };
-      setWriteDB((prev) => [...prev, record]);
-      addLog("command", `Write model updated → users table (id: ${id})`);
-    }, 700);
+    setPhase("command");
+    push(`CreateUser { name: "${name}" }`, "primary");
 
-    t(() => {
-      setPhase("event-emitting");
-      addLog("event", `UserCreatedEvent { id: ${id}, name: "${name}" } → Event Bus`);
-    }, 1400);
+    at(500, () => {
+      setWriteDb((prev) => [...prev, { id, name, email }]);
+      setPhase("written");
+      push(`✓ Write model committed — users(id=${id})`, "warning");
+    });
 
-    const pending: ReadRecord = {
-      id, displayName: name, email, orders: 0,
-      status: "active",
-    };
-    setPendingRead(pending);
+    at(950, () => {
+      setPhase("published");
+      push(`UserCreated { id: ${id} } → event bus`, "info");
+    });
 
-    t(() => {
-      setPhase("projection-updating");
-      addLog("info", `⏳ Projection updating… (${lag}ms lag)`);
-    }, 1800);
+    at(1300, () => {
+      setPhase("projecting");
+      push(`⏳ Projector rebuilding read model (${lagMs}ms)`, "warning");
+    });
 
-    t(() => {
-      setReadDB((prev) => [...prev, pending]);
-      setPendingRead(null);
-      addLog("event", `Read model projection updated → user_summary view (id: ${id})`);
-      setPhase("done");
-      t(() => setPhase("idle"), 600);
-    }, 1800 + lag);
-  }
+    at(1300 + lagMs, () => {
+      setReadDb((prev) => [...prev, { id, displayName: name, email, orders: 0 }]);
+      setPhase("caught-up");
+      push(`✓ Read model caught up — user_summary(id=${id})`, "success");
+      at(700, () => setPhase("idle"));
+    });
+  }, [busy, at, lagMs, push]);
 
-  // ── Query ─────────────────────────────────────────────────────────────────
-
-  function sendQuery() {
-    const id = parseInt(queryId, 10);
-    const record = readDB.find((r) => r.id === id) ?? null;
-    setQueryResult(record);
-    addLog("query", record
-      ? `GetUser(${id}) → { displayName: "${record.displayName}", orders: ${record.orders} }`
-      : `GetUser(${id}) → null (not found)`
-    );
-  }
-
-  // ── Reset ─────────────────────────────────────────────────────────────────
+  /** Queries only ever hit the read store — that is the whole point. */
+  const sendQuery = useCallback((id: number) => {
+    const row = readDb.find((r) => r.id === id) ?? null;
+    const existsInWrite = writeDb.some((r) => r.id === id);
+    const stale = !row && existsInWrite;
+    setQueryResult({ id, row, stale });
+    if (stale) {
+      setStaleReads((n) => n + 1);
+      push(`GetUser(${id}) → null · written but not yet projected`, "danger");
+    } else if (row) {
+      push(`GetUser(${id}) → { orders: ${row.orders} }`, "success");
+    } else {
+      push(`GetUser(${id}) → null · no such user`, "neutral");
+    }
+  }, [readDb, writeDb, push]);
 
   function reset() {
     clearTimers();
-    nextId = 3;
-    setWriteDB(INITIAL_WRITE);
-    setReadDB(INITIAL_READ);
+    nextId.current = 3;
+    setWriteDb(SEED_WRITE);
+    setReadDb(SEED_READ);
     setPhase("idle");
-    setLog([]);
-    setPendingRead(null);
     setQueryResult(null);
-    setNewName("Carol Jones");
-    setNewEmail("carol@corp.com");
+    setStaleReads(0);
+    clearLog();
   }
 
-  useEffect(() => () => clearTimers(), []);
-
-  // ─── Arrow animation positions ────────────────────────────────────────────
-  const cmdArrowActive  = phase === "command-flying";
-  const eventArrowActive = phase === "event-emitting" || phase === "projection-updating";
+  // Derived from state, not from the id counter — reading a ref during render
+  // is exactly the pattern that goes stale when React re-renders for other reasons.
+  const newestId = writeDb.length ? Math.max(...writeDb.map((r) => r.id)) : 0;
 
   return (
-    <div className="flex flex-col gap-6">
+    <VizFrame>
+      <VizStatus
+        hue={inconsistent ? "warning" : phase === "command" ? "primary" : "success"}
+        label={PHASE_LABEL[phase]}
+        pulse={busy}
+        aside={
+          inconsistent ? (
+            <span className="font-mono text-xs text-amber-300">
+              {writeDb.length - readDb.length} row behind
+            </span>
+          ) : null
+        }
+      >
+        {inconsistent
+          ? "The write store has the new row; the read store does not. Query it now and you get a stale answer — this is eventual consistency, not a bug."
+          : phase === "command"
+            ? "Command travelling to its handler."
+            : "Both stores agree. Reads and writes scale independently."}
+      </VizStatus>
 
-      {/* ── Diagram ──────────────────────────────────────────────────────── */}
-      <div className="overflow-x-auto">
-        <svg width="600" height="220" viewBox="0 0 600 220" className="w-full max-w-2xl mx-auto overflow-visible">
-          <defs>
-            <marker id="cqrs-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-              <polygon points="0 0, 8 3, 0 6" fill="#6366f1" />
-            </marker>
-            <marker id="cqrs-arr-event" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-              <polygon points="0 0, 8 3, 0 6" fill="#34d399" />
-            </marker>
-          </defs>
+      <div ref={hostRef}>
+        <VizStage>
+          <VizSvg w={W} h={H} label="CQRS: a command path writing to a normalised store, and a query path reading a projected store">
+            {/* Band tints separating the two sides */}
+            <rect x={0} y={0} width={W} height={BUS_Y - 6} fill={HUE.warning.base} fillOpacity={0.03} />
+            <rect x={0} y={BUS_Y + BUS_H + 6} width={W} height={H - BUS_Y - BUS_H - 6} fill={HUE.success.base} fillOpacity={0.03} />
+            <VizText x={W - 10} y={14} size={TYPE.micro} anchor="end" mono fill="#a16207">write side</VizText>
+            <VizText x={W - 10} y={H - 8} size={TYPE.micro} anchor="end" mono fill="#0f766e">read side</VizText>
 
-          {/* CLIENT */}
-          <rect x={10} y={80} width={90} height={44} rx={8} fill="#18181b" stroke="#4f46e5" strokeWidth="1.5" />
-          <text x={55} y={98} textAnchor="middle" fill="#e4e4e7" fontSize="11" fontWeight="600" fontFamily="sans-serif">Client</text>
-          <text x={55} y={114} textAnchor="middle" fill="#71717a" fontSize="8" fontFamily="sans-serif">App / API</text>
+            {/* Command path */}
+            <VizEdge from={[CLIENT_X + CLIENT_W, TOP_Y + NODE_H / 2 + 24]} to={[H_X, TOP_Y + NODE_H / 2]} hue="warning" arrow active={phase === "command"} />
+            <VizEdge from={[H_X + H_W, TOP_Y + NODE_H / 2]} to={[DB_X, TOP_Y + NODE_H / 2]} hue="warning" arrow active={phase === "written"} />
+            {/* Write store → bus → projector → read store */}
+            <VizEdge from={[DB_X + DB_W / 2, TOP_Y + NODE_H]} to={[DB_X + DB_W / 2, BUS_Y]} hue="info" arrow active={phase === "published"} />
+            <VizEdge from={[DB_X + DB_W, BUS_Y + BUS_H / 2]} to={[PROJ_X, BUS_Y + BUS_H / 2]} hue="info" arrow active={phase === "projecting"} />
+            <VizEdge from={[PROJ_X + PROJ_W / 2, BUS_Y + BUS_H]} to={[DB_X + DB_W / 2 + 30, BOT_Y]} hue="success" arrow active={phase === "projecting"} curve={40} />
+            {/* Query path */}
+            <VizEdge from={[CLIENT_X + CLIENT_W, BOT_Y + NODE_H / 2 - 24]} to={[H_X, BOT_Y + NODE_H / 2]} hue="success" arrow />
+            <VizEdge from={[H_X + H_W, BOT_Y + NODE_H / 2]} to={[DB_X, BOT_Y + NODE_H / 2]} hue="success" arrow />
 
-          {/* COMMAND HANDLER */}
-          <rect x={160} y={30} width={110} height={44} rx={8}
-            fill={cmdArrowActive ? "#1e1b4b" : "#18181b"}
-            stroke={cmdArrowActive ? "#818cf8" : "#4f46e5"}
-            strokeWidth={cmdArrowActive ? 2 : 1}
-          />
-          <text x={215} y={48} textAnchor="middle" fill="#e4e4e7" fontSize="10" fontWeight="600" fontFamily="sans-serif">Command Handler</text>
-          <text x={215} y={63} textAnchor="middle" fill="#71717a" fontSize="8" fontFamily="sans-serif">CreateUser · UpdateUser</text>
+            {/* Client spans both */}
+            <VizNode
+              x={CLIENT_X} y={H / 2 - 28} w={CLIENT_W} h={56}
+              title="Client" sublabel="app / API" hue="neutral"
+            />
 
-          {/* QUERY HANDLER */}
-          <rect x={160} y={140} width={110} height={44} rx={8}
-            fill="#18181b" stroke="#7c3aed" strokeWidth="1"
-          />
-          <text x={215} y={158} textAnchor="middle" fill="#e4e4e7" fontSize="10" fontWeight="600" fontFamily="sans-serif">Query Handler</text>
-          <text x={215} y={173} textAnchor="middle" fill="#71717a" fontSize="8" fontFamily="sans-serif">GetUser · ListUsers</text>
+            {/* Handlers */}
+            <VizNode
+              x={H_X} y={TOP_Y} w={H_W} h={NODE_H}
+              title="Command Handler" sublabel="validate · mutate"
+              hue="warning" active={phase === "command" || phase === "written"}
+            />
+            <VizNode
+              x={H_X} y={BOT_Y} w={H_W} h={NODE_H}
+              title="Query Handler" sublabel="read only"
+              hue="success" active={Boolean(queryResult)}
+            />
 
-          {/* WRITE DB */}
-          <rect x={340} y={30} width={100} height={44} rx={8}
-            fill={phase === "command-writing" ? "#1c1917" : "#18181b"}
-            stroke={phase === "command-writing" ? "#f59e0b" : "#52525b"}
-            strokeWidth={phase === "command-writing" ? 2 : 1}
-          />
-          <text x={390} y={48} textAnchor="middle" fill="#d97706" fontSize="10" fontWeight="600" fontFamily="sans-serif">Write DB</text>
-          <text x={390} y={63} textAnchor="middle" fill="#71717a" fontSize="8" fontFamily="monospace">normalised · ACID</text>
+            {/* Stores */}
+            <VizNode
+              x={DB_X} y={TOP_Y} w={DB_W} h={NODE_H}
+              title="Write store" sublabel="normalised · ACID" footnote={`${writeDb.length} rows`}
+              hue="warning" active={phase === "written"}
+            />
+            <VizNode
+              x={DB_X} y={BOT_Y} w={DB_W} h={NODE_H}
+              title="Read store" sublabel="denormalised · fast" footnote={`${readDb.length} rows`}
+              hue="success" active={phase === "projecting" || phase === "caught-up"}
+            />
 
-          {/* EVENT BUS */}
-          <rect x={340} y={88} width={100} height={36} rx={8}
-            fill={eventArrowActive ? "#1e1b4b" : "#18181b"}
-            stroke={eventArrowActive ? "#818cf8" : "#3f3f46"}
-            strokeWidth={eventArrowActive ? 1.5 : 1}
-          />
-          <text x={390} y={107} textAnchor="middle" fill={eventArrowActive ? "#a5b4fc" : "#71717a"} fontSize="9" fontWeight="600" fontFamily="sans-serif">Event Bus</text>
-          <text x={390} y={119} textAnchor="middle" fill="#52525b" fontSize="7.5" fontFamily="monospace">Kafka / SNS</text>
+            {/* Event bus */}
+            <rect
+              x={DB_X - 30} y={BUS_Y} width={DB_W + 60} height={BUS_H} rx={10}
+              fill={phase === "published" ? "url(#viz-node-active)" : "url(#viz-node)"}
+              stroke={HUE.info.line} strokeWidth={phase === "published" ? STROKE.base : STROKE.thin}
+              strokeOpacity={phase === "published" ? 1 : 0.6}
+            />
+            <VizText x={DB_X + DB_W / 2} y={BUS_Y + BUS_H / 2} size={TYPE.small} weight={600} hue="info" mono>
+              event bus
+            </VizText>
 
-          {/* READ DB */}
-          <rect x={340} y={140} width={100} height={44} rx={8}
-            fill={phase === "projection-updating" || phase === "done" ? "#0f172a" : "#18181b"}
-            stroke={phase === "projection-updating" ? "#34d399" : phase === "done" ? "#059669" : "#52525b"}
-            strokeWidth={phase === "projection-updating" || phase === "done" ? 2 : 1}
-          />
-          <text x={390} y={158} textAnchor="middle" fill="#34d399" fontSize="10" fontWeight="600" fontFamily="sans-serif">Read DB</text>
-          <text x={390} y={173} textAnchor="middle" fill="#71717a" fontSize="8" fontFamily="monospace">denormalised · fast</text>
+            {/* Projector */}
+            <VizNode
+              x={PROJ_X} y={BUS_Y - 8} w={PROJ_W} h={BUS_H + 16}
+              title="Projector" sublabel="builds read model"
+              hue="info" active={phase === "projecting"}
+            />
 
-          {/* PROJECTOR */}
-          <rect x={475} y={88} width={100} height={36} rx={8}
-            fill={phase === "projection-updating" ? "#052e16" : "#18181b"}
-            stroke={phase === "projection-updating" ? "#34d399" : "#3f3f46"}
-            strokeWidth={phase === "projection-updating" ? 1.5 : 1}
-          />
-          <text x={525} y={107} textAnchor="middle" fill={phase === "projection-updating" ? "#86efac" : "#71717a"} fontSize="9" fontWeight="600" fontFamily="sans-serif">Projector</text>
-          <text x={525} y={119} textAnchor="middle" fill="#52525b" fontSize="7.5" fontFamily="sans-serif">builds read model</text>
-
-          {/* ── Arrows ── */}
-          {/* Client → Command Handler */}
-          <line x1={100} y1={88} x2={158} y2={60} stroke={cmdArrowActive ? "#818cf8" : "#3f3f46"}
-            strokeWidth={cmdArrowActive ? 2 : 1} strokeDasharray={cmdArrowActive ? "0" : "3,3"}
-            markerEnd="url(#cqrs-arr)" />
-          <text x={118} y={70} fill="#6366f1" fontSize="7.5" fontFamily="monospace"
-            opacity={cmdArrowActive ? 1 : 0.4}>
-            Command
-          </text>
-
-          {/* Client ← Query Handler */}
-          <line x1={158} y1={168} x2={100} y2={118} stroke="#7c3aed"
-            strokeWidth="1" strokeDasharray="3,3" markerEnd="url(#cqrs-arr)" />
-          <text x={108} y={152} fill="#7c3aed" fontSize="7.5" fontFamily="monospace" opacity={0.6}>
-            Query
-          </text>
-
-          {/* Command Handler → Write DB */}
-          <line x1={270} y1={52} x2={338} y2={52} stroke="#f59e0b"
-            strokeWidth={phase === "command-writing" ? 2 : 1}
-            strokeDasharray={phase === "command-writing" ? "0" : "3,3"}
-            markerEnd="url(#cqrs-arr)" />
-
-          {/* Write DB → Event Bus */}
-          <line x1={390} y1={74} x2={390} y2={86} stroke={eventArrowActive ? "#818cf8" : "#3f3f46"}
-            strokeWidth={eventArrowActive ? 2 : 1} markerEnd="url(#cqrs-arr)" />
-
-          {/* Event Bus → Projector */}
-          <line x1={440} y1={106} x2={473} y2={106} stroke={eventArrowActive ? "#34d399" : "#3f3f46"}
-            strokeWidth={eventArrowActive ? 1.5 : 1} markerEnd="url(#cqrs-arr-event)" />
-
-          {/* Projector → Read DB */}
-          <line x1={525} y1={124} x2={450} y2={148} stroke={phase === "projection-updating" ? "#34d399" : "#3f3f46"}
-            strokeWidth={phase === "projection-updating" ? 2 : 1} markerEnd="url(#cqrs-arr-event)" />
-
-          {/* Query Handler → Read DB */}
-          <line x1={270} y1={162} x2={338} y2={162} stroke="#7c3aed"
-            strokeWidth="1" strokeDasharray="3,3" markerEnd="url(#cqrs-arr)" />
-
-          {/* Eventual consistency lag label */}
-          {(phase === "projection-updating") && (
-            <text x={390} y={210} textAnchor="middle" fill="#f59e0b" fontSize="9" fontFamily="monospace">
-              ⏳ eventual consistency: ~{lag}ms lag
-            </text>
-          )}
-        </svg>
+            {/* Marker riding the active leg */}
+            {phase === "command" && <VizPacket x={H_X - 14} y={TOP_Y + NODE_H / 2} hue="warning" r={6} />}
+            {phase === "published" && <VizPacket x={DB_X + DB_W / 2} y={BUS_Y - 12} hue="info" r={6} />}
+            {phase === "projecting" && <VizPacket x={PROJ_X - 16} y={BUS_Y + BUS_H / 2} hue="info" r={6} />}
+          </VizSvg>
+        </VizStage>
       </div>
 
-      {/* ── Controls ─────────────────────────────────────────────────────── */}
-      <div className="grid sm:grid-cols-2 gap-4">
+      <VizControls>
+        <VizButton variant="primary" onClick={sendCommand} disabled={busy}>
+          ▶ Send command
+        </VizButton>
+        <VizButton variant="success" onClick={() => sendQuery(newestId)}>
+          ? Query newest (#{newestId})
+        </VizButton>
+        <VizButton variant="secondary" onClick={() => sendQuery(1)}>
+          ? Query #1
+        </VizButton>
+        <VizSpacer />
+        <VizButton variant="ghost" onClick={reset}>↺ Reset</VizButton>
+      </VizControls>
 
-        {/* Command side */}
-        <div className="flex flex-col gap-3 rounded-xl border border-indigo-900/50 bg-indigo-950/20 p-4">
-          <h3 className="text-sm font-semibold text-indigo-300 flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-indigo-400" />
-            Command (Write)
-          </h3>
-          <div className="flex flex-col gap-2">
-            <input
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder="Name"
-              className="rounded-lg bg-zinc-900 border border-zinc-800 px-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-600"
-            />
-            <input
-              value={newEmail}
-              onChange={(e) => setNewEmail(e.target.value)}
-              placeholder="Email"
-              className="rounded-lg bg-zinc-900 border border-zinc-800 px-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-600"
-            />
-          </div>
-          <button
-            onClick={sendCommand}
-            disabled={phase !== "idle"}
-            className="px-4 py-1.5 rounded-lg text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {phase === "idle" ? "▶ Send CreateUserCommand" : "⏳ Processing…"}
-          </button>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-zinc-600 shrink-0">Lag: {lag}ms</span>
-            <input
-              type="range" min={300} max={3000} step={100} value={lag}
-              onChange={(e) => setLag(Number(e.target.value))}
-              className="flex-1 accent-indigo-500 cursor-pointer"
-            />
-          </div>
-        </div>
-
-        {/* Query side */}
-        <div className="flex flex-col gap-3 rounded-xl border border-violet-900/50 bg-violet-950/20 p-4">
-          <h3 className="text-sm font-semibold text-violet-300 flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-violet-400" />
-            Query (Read)
-          </h3>
-          <div className="flex gap-2">
-            <input
-              value={queryId}
-              onChange={(e) => setQueryId(e.target.value)}
-              placeholder="User ID"
-              className="w-24 rounded-lg bg-zinc-900 border border-zinc-800 px-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-600"
-            />
-            <button
-              onClick={sendQuery}
-              className="flex-1 px-4 py-1.5 rounded-lg text-sm font-medium bg-violet-700 hover:bg-violet-600 text-white transition-colors"
-            >
-              ▶ Send GetUserQuery
-            </button>
-          </div>
-          {queryResult && (
-            <div className="rounded-lg bg-zinc-900 border border-zinc-800 p-3 font-mono text-xs text-zinc-300 flex flex-col gap-1">
-              <span className="text-violet-400">// read model response</span>
-              <span>{"{"}</span>
-              <span className="pl-4">id: <span className="text-amber-400">{queryResult.id}</span>,</span>
-              <span className="pl-4">displayName: <span className="text-emerald-400">"{queryResult.displayName}"</span>,</span>
-              <span className="pl-4">email: <span className="text-emerald-400">"{queryResult.email}"</span>,</span>
-              <span className="pl-4">orders: <span className="text-amber-400">{queryResult.orders}</span>,</span>
-              <span className="pl-4">status: <span className="text-emerald-400">"{queryResult.status}"</span></span>
-              <span>{"}"}</span>
-            </div>
-          )}
-          <button onClick={() => setQueryResult(null)} className="text-xs text-zinc-600 hover:text-zinc-400 self-start transition-colors">
-            clear result
-          </button>
-        </div>
+      {/* Projection lag is the knob that makes the trade-off concrete */}
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2.5 min-w-0">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-600 shrink-0">
+            projection lag
+          </span>
+          <input
+            type="range" min={200} max={4000} step={100}
+            value={lagMs}
+            onChange={(e) => setLagMs(Number(e.target.value))}
+            className="w-40 accent-violet-500"
+            aria-label="Projection lag in milliseconds"
+          />
+          <span className="font-mono text-xs text-zinc-400 tabular-nums w-14">{lagMs}ms</span>
+        </label>
+        <span className="text-[11px] text-zinc-600">
+          Raise it, send a command, then query immediately — that gap is where bugs live.
+        </span>
       </div>
 
-      {/* ── DB state ─────────────────────────────────────────────────────── */}
-      <div className="grid sm:grid-cols-2 gap-4">
-
-        {/* Write DB */}
-        <div className="flex flex-col gap-2">
-          <h4 className="text-xs font-mono text-amber-500 uppercase tracking-wide">
-            Write DB — normalised
-          </h4>
-          <div className="rounded-xl border border-zinc-800 overflow-hidden">
-            <table className="w-full text-xs font-mono">
-              <thead>
-                <tr className="border-b border-zinc-800 bg-zinc-900/60">
-                  <th className="text-left px-3 py-2 text-zinc-500">id</th>
-                  <th className="text-left px-3 py-2 text-zinc-500">name</th>
-                  <th className="text-left px-3 py-2 text-zinc-500">orders</th>
-                  <th className="text-left px-3 py-2 text-zinc-500">ts</th>
-                </tr>
-              </thead>
-              <tbody>
-                {writeDB.map((r) => (
-                  <tr key={r.id} className="border-b border-zinc-900 last:border-0 hover:bg-zinc-900/40">
-                    <td className="px-3 py-1.5 text-amber-400">{r.id}</td>
-                    <td className="px-3 py-1.5 text-zinc-300">{r.name}</td>
-                    <td className="px-3 py-1.5 text-zinc-400">{r.orderCount}</td>
-                    <td className="px-3 py-1.5 text-zinc-600">{r.ts}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {/* The two stores, side by side, so the shape difference is visible */}
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="flex flex-col gap-2 min-w-0">
+          <div className="flex items-baseline justify-between">
+            <span className="text-[10px] font-mono uppercase tracking-widest text-amber-400">write model</span>
+            <span className="font-mono text-[10px] text-zinc-600">normalised</span>
+          </div>
+          <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/80 overflow-hidden">
+            {writeDb.map((r) => (
+              <div key={r.id} className="px-3 py-2 border-b border-zinc-900 last:border-0 font-mono text-[11px] flex gap-2">
+                <span className="text-zinc-600 w-4 tabular-nums">{r.id}</span>
+                <span className="text-zinc-200 truncate">{r.name}</span>
+                <span className="text-zinc-600 truncate ml-auto">{r.email}</span>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Read DB */}
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-2">
-            <h4 className="text-xs font-mono text-emerald-500 uppercase tracking-wide">
-              Read DB — denormalised
-            </h4>
-            {pendingRead && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 animate-pulse">
-                updating…
-              </span>
+        <div className="flex flex-col gap-2 min-w-0">
+          <div className="flex items-baseline justify-between">
+            <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-400">read model</span>
+            <span className="font-mono text-[10px] text-zinc-600">denormalised · pre-joined</span>
+          </div>
+          <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/80 overflow-hidden">
+            {readDb.map((r) => (
+              <div key={r.id} className="px-3 py-2 border-b border-zinc-900 last:border-0 font-mono text-[11px] flex gap-2">
+                <span className="text-zinc-600 w-4 tabular-nums">{r.id}</span>
+                <span className="text-zinc-200 truncate">{r.displayName}</span>
+                <span className="text-violet-300 shrink-0">{r.orders} orders</span>
+              </div>
+            ))}
+            {inconsistent && (
+              <div className="px-3 py-2 border-t border-amber-500/25 bg-amber-500/[0.07] font-mono text-[11px] text-amber-300">
+                ⏳ waiting for projection…
+              </div>
             )}
           </div>
-          <div className="rounded-xl border border-zinc-800 overflow-hidden">
-            <table className="w-full text-xs font-mono">
-              <thead>
-                <tr className="border-b border-zinc-800 bg-zinc-900/60">
-                  <th className="text-left px-3 py-2 text-zinc-500">id</th>
-                  <th className="text-left px-3 py-2 text-zinc-500">displayName</th>
-                  <th className="text-left px-3 py-2 text-zinc-500">orders</th>
-                  <th className="text-left px-3 py-2 text-zinc-500">status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {readDB.map((r) => (
-                  <tr key={r.id} className="border-b border-zinc-900 last:border-0 hover:bg-zinc-900/40">
-                    <td className="px-3 py-1.5 text-emerald-400">{r.id}</td>
-                    <td className="px-3 py-1.5 text-zinc-300">{r.displayName}</td>
-                    <td className="px-3 py-1.5 text-zinc-400">{r.orders}</td>
-                    <td className="px-3 py-1.5 text-zinc-400">{r.status}</td>
-                  </tr>
-                ))}
-                {pendingRead && (
-                  <tr className="border-b border-zinc-900 last:border-0 opacity-40">
-                    <td className="px-3 py-1.5 text-emerald-400">{pendingRead.id}</td>
-                    <td className="px-3 py-1.5 text-zinc-300">{pendingRead.displayName}</td>
-                    <td className="px-3 py-1.5 text-zinc-400">{pendingRead.orders}</td>
-                    <td className="px-3 py-1.5 text-amber-400">pending…</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
         </div>
       </div>
 
-      {/* ── Event log ────────────────────────────────────────────────────── */}
-      {log.length > 0 && (
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 flex flex-col gap-1 font-mono text-xs">
-          {log.map((entry) => {
-            const color =
-              entry.side === "command" ? "text-indigo-400" :
-              entry.side === "event"   ? "text-emerald-400" :
-              entry.side === "query"   ? "text-violet-400" :
-              "text-zinc-500";
-            const prefix =
-              entry.side === "command" ? "[CMD]   " :
-              entry.side === "event"   ? "[EVENT] " :
-              entry.side === "query"   ? "[QUERY] " :
-              "[INFO]  ";
-            return (
-              <div key={entry.id} className={`${color} leading-snug`}>
-                <span className="opacity-50">{prefix}</span>{entry.text}
-              </div>
-            );
-          })}
+      {queryResult && (
+        <div className={`rounded-xl border px-4 py-3 font-mono text-[12px] ${
+          queryResult.stale
+            ? "border-red-500/40 bg-red-500/10 text-red-200"
+            : queryResult.row
+              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+              : "border-zinc-800 bg-zinc-900/40 text-zinc-400"
+        }`}>
+          <span className="opacity-70">GetUser({queryResult.id}) → </span>
+          {queryResult.row
+            ? `{ displayName: "${queryResult.row.displayName}", orders: ${queryResult.row.orders} }`
+            : "null"}
+          {queryResult.stale && (
+            <span className="block mt-1 opacity-90">
+              The row exists in the write store. The read side has not caught up yet.
+            </span>
+          )}
         </div>
       )}
 
-      {/* ── Reset ────────────────────────────────────────────────────────── */}
-      <div className="flex gap-3 items-center">
-        <button
-          onClick={reset}
-          className="px-3 py-1.5 rounded-lg text-sm text-zinc-500 hover:text-zinc-300 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors"
-        >
-          ↺ Reset
-        </button>
-        <p className="text-xs text-zinc-600">
-          Drag the <span className="text-amber-400">Lag</span> slider higher to see eventual consistency in action — the Write DB updates immediately, the Read DB catches up later.
-        </p>
+      <VizStats
+        items={[
+          { label: "write rows", value: writeDb.length, hue: "warning" },
+          { label: "read rows", value: readDb.length, hue: "success" },
+          { label: "stale reads hit", value: staleReads, hue: staleReads ? "danger" : "neutral" },
+        ]}
+      />
+
+      <VizLog entries={entries} rows={4} />
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <VizLegend
+          items={[
+            { hue: "warning", label: "command path" },
+            { hue: "info", label: "event + projection" },
+            { hue: "success", label: "query path" },
+          ]}
+        />
+        <VizHint>Two models, two stores, one direction of flow — writes never read the read model.</VizHint>
       </div>
-    </div>
+    </VizFrame>
   );
 }

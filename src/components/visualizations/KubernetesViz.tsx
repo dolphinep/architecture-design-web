@@ -1,335 +1,370 @@
 "use client";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import {
+  VizFrame, VizStage, VizHint, VizControls, VizButton, VizSpacer,
+  VizStatus, VizStats, VizLegend, VizLog,
+  useOnScreen, useReducedMotion, useEventLog,
+  HUE_CLASS, type HueName,
+} from "./_shared";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type PodStatus = "running" | "pending" | "terminating" | "failed" | "empty";
-type NodeStatus = "healthy" | "failed";
+type PodPhase = "running" | "pending" | "terminating" | "failed";
+type Version = "v1" | "v2";
 
 interface Pod {
   id: string;
-  name: string;
-  version: "v1" | "v2";
-  status: PodStatus;
+  phase: PodPhase;
+  version: Version;
 }
 
-interface Node {
+interface ClusterNode {
   id: string;
   label: string;
-  status: NodeStatus;
+  ready: boolean;
   pods: Pod[];
 }
 
 type ScenarioId = "scale-out" | "node-failure" | "rolling-deploy";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+/**
+ * Pod ids are assigned from a counter rather than `Math.random()`. The previous
+ * version generated random ids while building module-level initial state, so the
+ * server-rendered ids never matched the client's on hydration.
+ */
+let podSeq = 0;
+const nextPodId = () => `pod-${++podSeq}`;
 
-function makePod(idx: number, version: "v1" | "v2" = "v1", status: PodStatus = "running"): Pod {
-  return { id: `pod-${idx}-${Math.random().toString(36).slice(2, 5)}`, name: `app-${idx}`, version, status };
+function initialCluster(): ClusterNode[] {
+  podSeq = 0;
+  const pod = (version: Version = "v1"): Pod => ({ id: nextPodId(), phase: "running", version });
+  return [
+    { id: "node-1", label: "Node 1", ready: true, pods: [pod(), pod()] },
+    { id: "node-2", label: "Node 2", ready: true, pods: [pod(), pod()] },
+    { id: "node-3", label: "Node 3", ready: true, pods: [pod()] },
+  ];
 }
 
-const INITIAL_STATE: Node[] = [
-  { id: "node-1", label: "Node 1", status: "healthy", pods: [makePod(1), makePod(2)] },
-  { id: "node-2", label: "Node 2", status: "healthy", pods: [makePod(3), makePod(4)] },
-  { id: "node-3", label: "Node 3", status: "healthy", pods: [makePod(5)] },
+const PHASE_META: Record<PodPhase | "v2", { hue: HueName; glyph: string; label: string }> = {
+  running:     { hue: "info",    glyph: "v1", label: "Running (v1)" },
+  v2:          { hue: "success", glyph: "v2", label: "Running (v2)" },
+  pending:     { hue: "warning", glyph: "◌",  label: "Pending" },
+  terminating: { hue: "danger",  glyph: "↓",  label: "Terminating" },
+  failed:      { hue: "neutral", glyph: "✗",  label: "Failed" },
+};
+
+const podMeta = (p: Pod) =>
+  p.phase === "running" && p.version === "v2" ? PHASE_META.v2 : PHASE_META[p.phase];
+
+const SCENARIOS: Array<{ id: ScenarioId; label: string; desc: string }> = [
+  { id: "scale-out",      label: "Scale out",      desc: "scheduler places 3 new pods" },
+  { id: "node-failure",   label: "Node failure",   desc: "Node 2 dies, pods reschedule" },
+  { id: "rolling-deploy", label: "Rolling deploy", desc: "v1 → v2, one pod at a time" },
 ];
 
-// ─── Component ────────────────────────────────────────────────────────────────
+const DESIRED_REPLICAS = 5;
 
 export function KubernetesViz() {
-  const [nodes, setNodes] = useState<Node[]>(structuredClone(INITIAL_STATE));
-  const [log, setLog] = useState<string[]>([]);
-  const [running, setRunning] = useState(false);
-  const [activeScenario, setActiveScenario] = useState<ScenarioId | null>(null);
-  const logId = useRef(0);
+  const [nodes, setNodes] = useState<ClusterNode[]>(initialCluster);
+  const [busy, setBusy] = useState(false);
+  const [scenario, setScenario] = useState<ScenarioId | null>(null);
+
+  const { entries, push, clear: clearLog } = useEventLog(8);
+  const { ref: hostRef } = useOnScreen<HTMLDivElement>();
+  const reduced = useReducedMotion();
+
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const clearTimers = useCallback(() => {
+    timers.current.forEach(clearTimeout);
+    timers.current = [];
+  }, []);
+  useEffect(() => clearTimers, [clearTimers]);
 
-  function clearTimers() { timers.current.forEach(clearTimeout); timers.current = []; }
-  useEffect(() => () => clearTimers(), []);
+  /** Schedule a step. With reduced motion every step lands immediately, in order. */
+  const at = useCallback((ms: number, fn: () => void) => {
+    if (reduced) { fn(); return; }
+    timers.current.push(setTimeout(fn, ms));
+  }, [reduced]);
 
-  function t(fn: () => void, ms: number) {
-    const id = setTimeout(fn, ms);
-    timers.current.push(id);
-  }
-
-  function addLog(msg: string) {
-    setLog((prev) => [msg, ...prev].slice(0, 12));
-  }
-
-  function reset() {
+  const reset = useCallback(() => {
     clearTimers();
-    setNodes(structuredClone(INITIAL_STATE));
-    setLog([]);
-    setRunning(false);
-    setActiveScenario(null);
-  }
+    setNodes(initialCluster());
+    setBusy(false);
+    setScenario(null);
+    clearLog();
+  }, [clearTimers, clearLog]);
 
-  // ── Scale-out ─────────────────────────────────────────────────────────────
+  // ── Scenarios ───────────────────────────────────────────────────────────────
 
-  function runScaleOut() {
-    setRunning(true); setActiveScenario("scale-out");
-    addLog("kubectl scale deployment/app --replicas=8");
-
-    // Add pending pods distributed across nodes
-    const newPods: Array<{ nodeIdx: number; pod: Pod }> = [
-      { nodeIdx: 0, pod: { ...makePod(6), status: "pending" } },
-      { nodeIdx: 1, pod: { ...makePod(7), status: "pending" } },
-      { nodeIdx: 2, pod: { ...makePod(8), status: "pending" } },
-    ];
-
-    t(() => {
-      setNodes((prev) => prev.map((n, i) => {
-        const np = newPods.filter((x) => x.nodeIdx === i).map((x) => x.pod);
-        return np.length ? { ...n, pods: [...n.pods, ...np] } : n;
-      }));
-      addLog("Scheduler: assigning 3 new pods to nodes…");
-    }, 600);
-
-    t(() => {
-      setNodes((prev) => prev.map((n) => ({
-        ...n,
-        pods: n.pods.map((p) => p.status === "pending" ? { ...p, status: "running" } : p),
-      })));
-      addLog("✓ 3 pods Running — desired replicas: 8");
-      setRunning(false);
-    }, 2000);
-  }
-
-  // ── Node failure ──────────────────────────────────────────────────────────
-
-  function runNodeFailure() {
-    setRunning(true); setActiveScenario("node-failure");
-    addLog("⚠ Node 2 heartbeat lost…");
-
-    // Mark node 2 failed
-    t(() => {
-      setNodes((prev) => prev.map((n) =>
-        n.id === "node-2"
-          ? { ...n, status: "failed", pods: n.pods.map((p) => ({ ...p, status: "failed" })) }
-          : n
-      ));
-      addLog("Node 2 marked NotReady — evicting pods");
-    }, 800);
-
-    // Reschedule pods from node 2 onto node 1 and 3
-    t(() => {
-      setNodes((prev) => {
-        const failedPods = prev.find((n) => n.id === "node-2")?.pods ?? [];
-        addLog(`Rescheduling ${failedPods.length} pods onto healthy nodes…`);
-        return prev.map((n) => {
-          if (n.id === "node-1")
-            return { ...n, pods: [...n.pods, { ...failedPods[0], id: failedPods[0].id + "-r", status: "pending" }] };
-          if (n.id === "node-3")
-            return { ...n, pods: [...n.pods, { ...failedPods[1], id: failedPods[1].id + "-r", status: "pending" }] };
-          return n;
-        });
-      });
-    }, 1800);
-
-    t(() => {
-      setNodes((prev) => prev.map((n) => ({
-        ...n,
-        pods: n.pods.map((p) => p.status === "pending" ? { ...p, status: "running" } : p),
-      })));
-      addLog("✓ All pods Running — cluster self-healed");
-      setRunning(false);
-    }, 3200);
-  }
-
-  // ── Rolling deploy ────────────────────────────────────────────────────────
-
-  function runRollingDeploy() {
-    setRunning(true); setActiveScenario("rolling-deploy");
-    addLog("kubectl set image deployment/app container=app:v2");
-    addLog("Strategy: RollingUpdate (maxUnavailable: 1)");
-
-    // Collect all pod ids across nodes
-    const allPodIds: string[] = [];
-    INITIAL_STATE.forEach((n) => n.pods.forEach((p) => allPodIds.push(p.id)));
-
-    allPodIds.forEach((podId, i) => {
-      // Terminate old pod
-      t(() => {
-        setNodes((prev) => prev.map((n) => ({
+  function scaleOut() {
+    push("$ kubectl scale deployment/app --replicas=8", "primary");
+    at(500, () => {
+      setNodes((prev) =>
+        prev.map((n, i) =>
+          i < 3 ? { ...n, pods: [...n.pods, { id: nextPodId(), phase: "pending", version: "v1" }] } : n
+        )
+      );
+      push("Scheduler: binding 3 Pending pods to nodes…", "warning");
+    });
+    at(1700, () => {
+      setNodes((prev) =>
+        prev.map((n) => ({
           ...n,
-          pods: n.pods.map((p) => p.id === podId ? { ...p, status: "terminating" } : p),
-        })));
-        addLog(`Terminating pod ${podId.split("-")[1]} (v1)…`);
-      }, i * 900);
+          pods: n.pods.map((p) => (p.phase === "pending" ? { ...p, phase: "running" } : p)),
+        }))
+      );
+      push("✓ 8/8 replicas Running", "success");
+      setBusy(false);
+    });
+  }
 
-      // Replace with v2
-      t(() => {
-        setNodes((prev) => prev.map((n) => ({
-          ...n,
-          pods: n.pods.map((p) =>
-            p.id === podId ? { ...p, status: "running", version: "v2" } : p
-          ),
-        })));
-        addLog(`✓ New pod (v2) Running`);
-      }, i * 900 + 600);
+  function nodeFailure() {
+    push("⚠ Node 2 heartbeat lost", "warning");
+
+    at(700, () => {
+      setNodes((prev) =>
+        prev.map((n) =>
+          n.id === "node-2"
+            ? { ...n, ready: false, pods: n.pods.map((p) => ({ ...p, phase: "failed" as PodPhase })) }
+            : n
+        )
+      );
+      push("Node 2 → NotReady, tainted for eviction", "danger");
     });
 
-    t(() => {
-      addLog("✓ Rolling deploy complete — all replicas on v2");
-      setRunning(false);
-    }, allPodIds.length * 900 + 800);
+    at(1600, () => {
+      setNodes((prev) => {
+        const failed = prev.find((n) => n.id === "node-2")?.pods ?? [];
+        // Spread the evicted pods across whatever healthy nodes remain, rather
+        // than indexing fixed positions that assumed exactly two.
+        const healthy = prev.filter((n) => n.ready);
+        if (!healthy.length) return prev;
+        const assignment = new Map<string, Pod[]>();
+        failed.forEach((_, k) => {
+          const target = healthy[k % healthy.length];
+          const list = assignment.get(target.id) ?? [];
+          list.push({ id: nextPodId(), phase: "pending", version: "v1" });
+          assignment.set(target.id, list);
+        });
+        return prev.map((n) =>
+          assignment.has(n.id) ? { ...n, pods: [...n.pods, ...assignment.get(n.id)!] } : n
+        );
+      });
+      push("Rescheduling evicted pods onto healthy nodes…", "warning");
+    });
+
+    at(2700, () => {
+      setNodes((prev) =>
+        prev.map((n) => ({
+          ...n,
+          pods: n.pods.map((p) => (p.phase === "pending" ? { ...p, phase: "running" } : p)),
+        }))
+      );
+      push("✓ Desired replica count restored — cluster self-healed", "success");
+      setBusy(false);
+    });
   }
 
-  // ─── Render ───────────────────────────────────────────────────────────────
+  function rollingDeploy() {
+    push("$ kubectl set image deployment/app app=app:v2", "primary");
+    push("Strategy: RollingUpdate · maxUnavailable=1", "neutral");
 
-  function podColor(pod: Pod) {
-    if (pod.status === "running")     return pod.version === "v2" ? "#059669" : "#6366f1";
-    if (pod.status === "pending")     return "#f59e0b";
-    if (pod.status === "terminating") return "#ef4444";
-    if (pod.status === "failed")      return "#52525b";
-    return "#27272a";
+    // Read the *current* pods, so a roll after a scale-out covers them all.
+    const ids = nodes.flatMap((n) => n.pods.filter((p) => p.phase === "running").map((p) => p.id));
+
+    ids.forEach((id, i) => {
+      at(i * 750 + 400, () => {
+        setNodes((prev) =>
+          prev.map((n) => ({
+            ...n,
+            pods: n.pods.map((p) => (p.id === id ? { ...p, phase: "terminating" } : p)),
+          }))
+        );
+      });
+      at(i * 750 + 900, () => {
+        setNodes((prev) =>
+          prev.map((n) => ({
+            ...n,
+            pods: n.pods.map((p) => (p.id === id ? { ...p, phase: "running", version: "v2" } : p)),
+          }))
+        );
+        push(`✓ ${id} replaced with v2 (${i + 1}/${ids.length})`, "success");
+      });
+    });
+
+    at(ids.length * 750 + 1100, () => {
+      push("✓ Rollout complete — every replica on v2", "success");
+      setBusy(false);
+    });
   }
 
-  function podLabel(pod: Pod) {
-    if (pod.status === "running")     return pod.version === "v2" ? "v2" : "v1";
-    if (pod.status === "pending")     return "…";
-    if (pod.status === "terminating") return "↓";
-    if (pod.status === "failed")      return "✗";
-    return "";
+  function run(id: ScenarioId) {
+    clearTimers();
+    setNodes(initialCluster());
+    clearLog();
+    setBusy(true);
+    setScenario(id);
+    // Let the reset paint before the scenario starts mutating.
+    at(60, () => {
+      if (id === "scale-out") scaleOut();
+      else if (id === "node-failure") nodeFailure();
+      else rollingDeploy();
+    });
   }
 
-  const SCENARIOS: Array<{ id: ScenarioId; label: string; desc: string; color: string }> = [
-    { id: "scale-out",     label: "Scale out",      desc: "Scheduler adds 3 pods across nodes",             color: "text-indigo-400" },
-    { id: "node-failure",  label: "Node failure",   desc: "Node 2 fails → pods rescheduled automatically",  color: "text-red-400" },
-    { id: "rolling-deploy",label: "Rolling deploy", desc: "Replace v1 pods with v2 one at a time",          color: "text-emerald-400" },
-  ];
+  // ── Derived ────────────────────────────────────────────────────────────────
+
+  const allPods = nodes.flatMap((n) => n.pods);
+  const running = allPods.filter((p) => p.phase === "running").length;
+  const pending = allPods.filter((p) => p.phase === "pending").length;
+  const readyNodes = nodes.filter((n) => n.ready).length;
+  const onV2 = allPods.filter((p) => p.phase === "running" && p.version === "v2").length;
+
+  const statusHue: HueName = readyNodes < nodes.length ? "danger" : busy ? "warning" : "success";
+  const statusLabel = readyNodes < nodes.length ? "DEGRADED" : busy ? "RECONCILING" : "HEALTHY";
+  const statusText = busy
+    ? "The control plane is converging actual state on desired state."
+    : readyNodes < nodes.length
+      ? `${nodes.length - readyNodes} node NotReady — workloads moved elsewhere.`
+      : `${running} pods Running across ${readyNodes} ready nodes.`;
 
   return (
-    <div className="flex flex-col gap-5">
+    <VizFrame>
+      <VizStatus hue={statusHue} label={statusLabel} pulse={busy}>
+        {statusText}
+      </VizStatus>
 
-      {/* Scenario buttons */}
-      <div className="flex flex-wrap gap-2">
-        {SCENARIOS.map(({ id, label, desc, color }) => (
-          <button
-            key={id}
-            onClick={() => {
-              reset();
-              if (id === "scale-out")      setTimeout(runScaleOut,       100);
-              if (id === "node-failure")   setTimeout(runNodeFailure,    100);
-              if (id === "rolling-deploy") setTimeout(runRollingDeploy,  100);
-            }}
-            disabled={running}
-            className={`flex flex-col gap-0.5 px-3 py-2 rounded-lg text-left transition-colors border text-sm ${
-              activeScenario === id
-                ? "bg-zinc-700 border-zinc-500"
-                : "bg-zinc-900 border-zinc-800 hover:border-zinc-700"
-            } disabled:opacity-40 disabled:cursor-not-allowed`}
-          >
-            <span className={`font-medium ${activeScenario === id ? color : "text-zinc-200"}`}>{label}</span>
-            <span className="text-[10px] text-zinc-500">{desc}</span>
-          </button>
-        ))}
-        <button
-          onClick={reset}
-          className="px-3 py-2 rounded-lg text-sm text-zinc-500 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 hover:text-zinc-300 transition-colors self-start"
-        >
-          ↺ Reset
-        </button>
-      </div>
-
-      {/* Cluster diagram */}
-      <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-        {/* Control plane */}
-        <div className="flex items-center gap-3 mb-4 pb-3 border-b border-zinc-800">
-          <div className="rounded-lg border border-indigo-800 bg-indigo-950/50 px-3 py-2 text-xs">
-            <div className="text-indigo-300 font-semibold">Control Plane</div>
-            <div className="text-indigo-600 font-mono text-[10px]">API Server · Scheduler · etcd</div>
-          </div>
-          <svg width={20} height={20}>
-            <line x1={0} y1={10} x2={18} y2={10} stroke="#3f3f46" strokeWidth="1" strokeDasharray="3,2" />
-          </svg>
-          <span className="text-xs text-zinc-600">manages →</span>
-        </div>
-
-        {/* Nodes */}
-        <div className="grid sm:grid-cols-3 gap-3">
-          {nodes.map((node) => (
-            <div
-              key={node.id}
-              className={`rounded-xl border p-3 flex flex-col gap-2 transition-all ${
-                node.status === "failed"
-                  ? "border-red-800 bg-red-950/20"
-                  : "border-zinc-800 bg-zinc-900/40"
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-zinc-300">{node.label}</span>
-                <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
-                  node.status === "failed"
-                    ? "bg-red-950 text-red-400 border border-red-800"
-                    : "bg-emerald-950/50 text-emerald-400 border border-emerald-900"
-                }`}>
-                  {node.status === "failed" ? "NotReady" : "Ready"}
+      {/* Scenarios */}
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">
+          scenario
+        </span>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          {SCENARIOS.map((s) => {
+            const on = scenario === s.id;
+            return (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => run(s.id)}
+                disabled={busy}
+                aria-pressed={on}
+                className={`rounded-xl border px-3 py-2 text-left transition-all
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/70
+                  disabled:opacity-40 disabled:pointer-events-none
+                  ${on ? "border-violet-500/60 bg-violet-500/10" : "border-zinc-800 bg-zinc-900/40 hover:border-zinc-700"}`}
+              >
+                <span className={`block text-[13px] font-medium ${on ? "text-violet-200" : "text-zinc-300"}`}>
+                  {s.label}
                 </span>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {node.pods.map((pod) => (
-                  <div
-                    key={pod.id}
-                    className="w-9 h-9 rounded-lg flex items-center justify-center text-[10px] font-mono font-bold transition-all"
-                    style={{
-                      background: podColor(pod) + "22",
-                      border: `1.5px solid ${podColor(pod)}`,
-                      color: podColor(pod),
-                      boxShadow: pod.status === "running" ? `0 0 6px ${podColor(pod)}44` : "none",
-                    }}
-                    title={`${pod.name} (${pod.version}) — ${pod.status}`}
-                  >
-                    {podLabel(pod)}
-                  </div>
-                ))}
-              </div>
-              <div className="text-[10px] text-zinc-600 font-mono">
-                {node.pods.filter((p) => p.status === "running").length} running
-                {" · "}
-                {node.pods.filter((p) => p.status === "pending").length > 0 && (
-                  <span className="text-amber-600">
-                    {node.pods.filter((p) => p.status === "pending").length} pending
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Pod legend */}
-        <div className="flex flex-wrap gap-3 mt-3 pt-3 border-t border-zinc-900">
-          {[
-            { color: "#6366f1", label: "Running (v1)" },
-            { color: "#059669", label: "Running (v2)" },
-            { color: "#f59e0b", label: "Pending" },
-            { color: "#ef4444", label: "Terminating" },
-            { color: "#52525b", label: "Failed" },
-          ].map(({ color, label }) => (
-            <div key={label} className="flex items-center gap-1.5 text-[10px] text-zinc-500">
-              <div className="w-3 h-3 rounded" style={{ background: color + "33", border: `1px solid ${color}` }} />
-              {label}
-            </div>
-          ))}
+                <span className="block text-[11px] text-zinc-500 mt-0.5">{s.desc}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {/* Event log */}
-      {log.length > 0 && (
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 flex flex-col gap-1 font-mono text-xs">
-          {log.map((entry, i) => (
-            <div key={i} className={`leading-snug ${
-              entry.startsWith("✓") ? "text-emerald-400" :
-              entry.startsWith("⚠") || entry.startsWith("Terminating") ? "text-amber-400" :
-              entry.startsWith("kubectl") ? "text-indigo-400" :
-              "text-zinc-400"
-            }`}>
-              {entry}
+      <div ref={hostRef}>
+        <VizStage>
+          {/* Control plane */}
+          <div className="flex items-center gap-3 pb-3 mb-4 border-b border-zinc-800/70">
+            <div className="rounded-xl border border-violet-500/40 bg-violet-500/10 px-3 py-2">
+              <div className="text-[13px] font-semibold text-violet-200">Control Plane</div>
+              <div className="font-mono text-[11px] text-violet-400/70">api-server · scheduler · etcd</div>
             </div>
-          ))}
-        </div>
-      )}
+            <div className="flex-1 border-t border-dashed border-zinc-700" />
+            <span className="font-mono text-[11px] text-zinc-500 shrink-0">
+              reconciles → {DESIRED_REPLICAS}+ replicas
+            </span>
+          </div>
 
-    </div>
+          {/* Nodes */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {nodes.map((node) => (
+              <div
+                key={node.id}
+                className={`rounded-xl border p-3 flex flex-col gap-2.5 transition-colors ${
+                  node.ready
+                    ? "border-zinc-800 bg-zinc-900/40"
+                    : "border-red-500/40 bg-red-500/[0.07]"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[13px] font-semibold text-zinc-200">{node.label}</span>
+                  <span
+                    className={`font-mono text-[10px] px-1.5 py-0.5 rounded border ${
+                      node.ready
+                        ? "text-emerald-300 border-emerald-500/30 bg-emerald-500/10"
+                        : "text-red-300 border-red-500/40 bg-red-500/15"
+                    }`}
+                  >
+                    {node.ready ? "Ready" : "NotReady"}
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap gap-1.5 min-h-[38px] content-start">
+                  {node.pods.map((pod) => {
+                    const m = podMeta(pod);
+                    const c = HUE_CLASS[m.hue];
+                    return (
+                      <div
+                        key={pod.id}
+                        title={`${pod.id} · ${pod.version} · ${pod.phase}`}
+                        className={`w-9 h-9 rounded-lg border flex items-center justify-center
+                          font-mono text-[11px] font-bold transition-all duration-300
+                          ${c.border} ${c.bg} ${c.text}
+                          ${pod.phase === "terminating" ? "opacity-50 scale-90" : ""}`}
+                      >
+                        {m.glyph}
+                      </div>
+                    );
+                  })}
+                  {node.pods.length === 0 && (
+                    <span className="font-mono text-[11px] text-zinc-700 self-center">no pods</span>
+                  )}
+                </div>
+
+                <div className="font-mono text-[11px] text-zinc-500 tabular-nums">
+                  {node.pods.filter((p) => p.phase === "running").length} running
+                  {node.pods.some((p) => p.phase === "pending") && (
+                    <span className="text-amber-400">
+                      {" · "}
+                      {node.pods.filter((p) => p.phase === "pending").length} pending
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </VizStage>
+      </div>
+
+      <VizControls>
+        <VizSpacer />
+        <VizButton variant="ghost" onClick={reset}>↺ Reset cluster</VizButton>
+      </VizControls>
+
+      <VizStats
+        items={[
+          { label: "pods running", value: running, hue: "success" },
+          { label: "pending", value: pending, hue: pending ? "warning" : "neutral" },
+          { label: "nodes ready", value: `${readyNodes}/${nodes.length}`, hue: readyNodes === nodes.length ? "success" : "danger", meter: [readyNodes, nodes.length] },
+          { label: "on v2", value: `${onV2}/${running || 1}`, hue: "info", meter: [onV2, Math.max(running, 1)] },
+        ]}
+      />
+
+      <VizLog entries={entries} rows={5} />
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <VizLegend
+          items={[
+            { hue: "info", label: "Running v1" },
+            { hue: "success", label: "Running v2" },
+            { hue: "warning", label: "Pending" },
+            { hue: "danger", label: "Terminating" },
+            { hue: "neutral", label: "Failed" },
+          ]}
+        />
+        <VizHint>You declare the desired state; the control plane makes reality match it.</VizHint>
+      </div>
+    </VizFrame>
   );
 }

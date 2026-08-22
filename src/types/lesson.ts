@@ -25,7 +25,7 @@ export type SlideAnimation =
 
 export type Accent = "violet" | "emerald" | "cyan" | "amber" | "red" | "zinc";
 
-/** Inline markup supported in all text fields: **bold highlight** and `code` */
+/** Inline markup supported in all text fields: **bold highlight**, `code`, and [label](/href) links */
 export type SlideBlock =
   | { kind: "text"; text: string }
   | {

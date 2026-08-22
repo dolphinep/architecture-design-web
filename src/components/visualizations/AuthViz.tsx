@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
+import { VizControls, VizButton, VizSpacer } from "./_shared";
 
 type Tab = "oauth" | "jwt" | "verify" | "better-auth" | "gateway";
 type JwtPart = "header" | "payload" | "signature";
@@ -179,9 +180,9 @@ function RefreshFlow() {
                 />
                 <text x={actor.x} y={27} textAnchor="middle"
                   fill={isActive ? "#e4e4e7" : "#a1a1aa"}
-                  fontSize="10" fontWeight="600" fontFamily="sans-serif">{actor.label}</text>
+                  fontSize="13" fontWeight="600" fontFamily="sans-serif">{actor.label}</text>
                 <text x={actor.x} y={42} textAnchor="middle"
-                  fill="#52525b" fontSize="8" fontFamily="sans-serif">{actor.sub}</text>
+                  fill="#52525b" fontSize="11" fontFamily="sans-serif">{actor.sub}</text>
                 <line
                   x1={actor.x} y1={52} x2={actor.x} y2={R_SVG_H - 5}
                   stroke={isActive ? "#2d2d3a" : "#1f1f23"}
@@ -241,23 +242,19 @@ function RefreshFlow() {
         <p className="text-sm text-zinc-300 leading-relaxed">{step.detail}</p>
       </div>
 
-      {/* Nav */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={() => setActiveStep(p => Math.max(0, p - 1))}
-          disabled={activeStep === 0}
-          className="px-3 py-1.5 rounded-lg text-sm text-zinc-400 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 disabled:opacity-30 transition-colors"
-        >← Prev</button>
-        <button
+      <VizControls>
+        <VizButton onClick={() => setActiveStep(p => Math.max(0, p - 1))} disabled={activeStep === 0}>
+          ← prev
+        </VizButton>
+        <VizButton
           onClick={() => setActiveStep(p => Math.min(REFRESH_STEPS.length - 1, p + 1))}
           disabled={activeStep === REFRESH_STEPS.length - 1}
-          className="px-3 py-1.5 rounded-lg text-sm text-zinc-400 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 disabled:opacity-30 transition-colors"
-        >Next →</button>
-        <button
-          onClick={() => setActiveStep(0)}
-          className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
-        >↺ Reset</button>
-      </div>
+        >
+          next →
+        </VizButton>
+        <VizSpacer />
+        <VizButton variant="ghost" onClick={() => setActiveStep(0)}>↺ Reset</VizButton>
+      </VizControls>
 
       {/* Rotation explainer */}
       <div className="grid sm:grid-cols-3 gap-3 text-xs">
@@ -314,7 +311,7 @@ function JwtAnatomy() {
     <div className="flex flex-col gap-4">
       {/* Token display */}
       <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 font-mono text-sm leading-relaxed break-all">
-        <span className="text-zinc-500 text-xs block mb-2">// Click each part to decode</span>
+        <span className="text-zinc-500 text-xs block mb-2">{"// Click each part to decode"}</span>
         <button
           onClick={() => setActive("header")}
           className={`transition-colors ${active === "header" ? colors.header.text + " underline decoration-dotted" : colors.header.dim + " hover:text-rose-400"}`}
@@ -606,7 +603,7 @@ function TokenVerify() {
             <div key={s.name} className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-3 flex flex-col gap-1.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-zinc-200">{s.name}</span>
-                <span className={`text-[10px] px-1.5 py-0.5 rounded border font-mono ${
+                <span className={`text-[11px] px-1.5 py-0.5 rounded border font-mono ${
                   s.risk === "Very low"
                     ? "border-emerald-800/50 bg-emerald-950/30 text-emerald-400"
                     : "border-amber-800/50 bg-amber-950/30 text-amber-400"
@@ -685,7 +682,7 @@ function BADiagram({ nodes, edges }: { nodes: BANode[]; edges: BAEdge[] }) {
               markerEnd={e.dashed ? "url(#ba-ah-d)" : "url(#ba-ah)"} />
             {e.label && (
               <text x={mx + ox} y={my + oy} textAnchor="middle" dominantBaseline="middle"
-                fill={e.dashed ? "#3f3f46" : "#71717a"} fontSize="7" fontFamily="monospace">
+                fill={e.dashed ? "#3f3f46" : "#71717a"} fontSize="11" fontFamily="monospace">
                 {e.label}
               </text>
             )}
@@ -699,9 +696,9 @@ function BADiagram({ nodes, edges }: { nodes: BANode[]; edges: BAEdge[] }) {
             <rect x={n.x - BA_NW/2} y={n.y - BA_NH/2} width={BA_NW} height={BA_NH} rx={6}
               fill={s.fill} stroke={s.stroke} strokeWidth={1.5} />
             <text x={n.x} y={n.y - 5} textAnchor="middle"
-              fill={s.label} fontSize="9" fontWeight="600" fontFamily="sans-serif">{n.label}</text>
+              fill={s.label} fontSize="12" fontWeight="600" fontFamily="sans-serif">{n.label}</text>
             <text x={n.x} y={n.y + 9} textAnchor="middle"
-              fill={s.sub} fontSize="7.5" fontFamily="sans-serif">{n.sub}</text>
+              fill={s.sub} fontSize="11" fontFamily="sans-serif">{n.sub}</text>
           </g>
         );
       })}
@@ -753,10 +750,10 @@ function BetterAuthViz() {
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-orange-400">better-auth</span>
           <a href="https://www.better-auth.com" target="_blank" rel="noopener noreferrer"
-            className="text-[10px] px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-500 hover:text-zinc-300 font-mono transition-colors">
+            className="text-[11px] px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-500 hover:text-zinc-300 font-mono transition-colors">
             better-auth.com ↗
           </a>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-950/40 border border-orange-800/40 text-orange-400 font-mono">
+          <span className="text-[11px] px-1.5 py-0.5 rounded bg-orange-950/40 border border-orange-800/40 text-orange-400 font-mono">
             TypeScript-first
           </span>
         </div>
@@ -1067,9 +1064,9 @@ function GatewayAuthViz() {
                   stroke={isActive ? "#6366f1" : "#3f3f46"}
                   strokeWidth={isActive ? 2 : 1} />
                 <text x={a.x} y={27} textAnchor="middle" fill={isActive ? "#e4e4e7" : "#a1a1aa"}
-                  fontSize="10" fontWeight="600" fontFamily="sans-serif">{a.label}</text>
+                  fontSize="13" fontWeight="600" fontFamily="sans-serif">{a.label}</text>
                 <text x={a.x} y={42} textAnchor="middle" fill="#52525b"
-                  fontSize="8" fontFamily="sans-serif">{a.sub}</text>
+                  fontSize="11" fontFamily="sans-serif">{a.sub}</text>
                 <line x1={a.x} y1={52} x2={a.x} y2={SVG_H - 5}
                   stroke={isActive ? "#2d2d3a" : "#1f1f23"} strokeWidth="1" strokeDasharray="4,4" />
               </g>
@@ -1110,11 +1107,11 @@ function GatewayAuthViz() {
               <rect x={actorX("gateway") - 70} y={Y0 - 10} width={140} height={52} rx={6}
                 fill="#451a03" stroke="#d97706" strokeWidth={1.5} strokeDasharray="4,2" />
               <text x={actorX("gateway")} y={Y0 + 8} textAnchor="middle" fill="#fcd34d"
-                fontSize="8" fontWeight="600" fontFamily="monospace">① verify RS256</text>
+                fontSize="11" fontWeight="600" fontFamily="monospace">① verify RS256</text>
               <text x={actorX("gateway")} y={Y0 + 20} textAnchor="middle" fill="#fcd34d"
-                fontSize="8" fontFamily="monospace">② check exp/iss/aud</text>
+                fontSize="11" fontFamily="monospace">② check exp/iss/aud</text>
               <text x={actorX("gateway")} y={Y0 + 32} textAnchor="middle" fill="#fcd34d"
-                fontSize="8" fontFamily="monospace">③ extract claims</text>
+                fontSize="11" fontFamily="monospace">③ extract claims</text>
             </g>
           )}
         </svg>
@@ -1252,15 +1249,19 @@ export function AuthViz() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Tabs */}
-      <div className="flex gap-1 bg-zinc-900 rounded-lg p-1 w-fit">
+      {/* Sub-topic selector */}
+      <div className="flex gap-1 rounded-xl border border-zinc-800 bg-zinc-900/50 p-1 w-fit max-w-full overflow-x-auto" role="tablist">
         {(["oauth", "jwt", "verify", "gateway", "better-auth"] as Tab[]).map((t) => (
           <button
             key={t}
+            role="tab"
+            aria-selected={tab === t}
             onClick={() => setTab(t)}
-            className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors whitespace-nowrap ${
-              tab === t ? "bg-zinc-700 text-white" : "text-zinc-500 hover:text-zinc-300"
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-[13px] font-medium transition-colors whitespace-nowrap
+              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/70
+              ${tab === t
+                ? "bg-violet-500/20 text-violet-200"
+                : "text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/60"}`}
           >
             {t === "oauth" ? "OAuth + PKCE" :
              t === "jwt"   ? "JWT" :
@@ -1313,7 +1314,7 @@ export function AuthViz() {
                       x={actor.x} y={27}
                       textAnchor="middle"
                       fill={isActive ? "#e4e4e7" : "#a1a1aa"}
-                      fontSize="10" fontWeight="600" fontFamily="sans-serif"
+                      fontSize="13" fontWeight="600" fontFamily="sans-serif"
                     >
                       {actor.label}
                     </text>
@@ -1321,7 +1322,7 @@ export function AuthViz() {
                       x={actor.x} y={42}
                       textAnchor="middle"
                       fill="#52525b"
-                      fontSize="8" fontFamily="sans-serif"
+                      fontSize="11" fontFamily="sans-serif"
                     >
                       {actor.sub}
                     </text>
@@ -1392,46 +1393,35 @@ export function AuthViz() {
             <p className="text-sm text-zinc-300 leading-relaxed">{step.detail}</p>
           </div>
 
-          {/* Controls */}
-          <div className="flex flex-wrap items-center gap-3">
-            <button
+          <VizControls>
+            <VizButton
+              variant={playing ? "secondary" : "primary"}
+              active={playing}
+              onClick={() => {
+                if (playing) { setPlaying(false); return; }
+                if (activeStep === STEPS.length - 1) setActiveStep(0);
+                setPlaying(true);
+              }}
+            >
+              {playing ? "❙❙ Pause" : "▶ Auto-play"}
+            </VizButton>
+            <VizButton
               onClick={() => { setActiveStep((p) => Math.max(0, p - 1)); setPlaying(false); }}
               disabled={activeStep === 0}
-              className="px-3 py-1.5 rounded-lg text-sm text-zinc-400 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 disabled:opacity-30 transition-colors"
             >
-              ← Prev
-            </button>
-            <button
-              onClick={() => {
-                if (playing) {
-                  setPlaying(false);
-                } else {
-                  if (activeStep === STEPS.length - 1) setActiveStep(0);
-                  setPlaying(true);
-                }
-              }}
-              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                playing
-                  ? "bg-zinc-700 text-zinc-300 border border-zinc-600"
-                  : "bg-indigo-600 hover:bg-indigo-500 text-white"
-              }`}
-            >
-              {playing ? "⏸ Pause" : "▶ Auto-play"}
-            </button>
-            <button
+              ← prev
+            </VizButton>
+            <VizButton
               onClick={() => { setActiveStep((p) => Math.min(STEPS.length - 1, p + 1)); setPlaying(false); }}
               disabled={activeStep === STEPS.length - 1}
-              className="px-3 py-1.5 rounded-lg text-sm text-zinc-400 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 disabled:opacity-30 transition-colors"
             >
-              Next →
-            </button>
-            <button
-              onClick={() => { setActiveStep(0); setPlaying(false); }}
-              className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
-            >
+              next →
+            </VizButton>
+            <VizSpacer />
+            <VizButton variant="ghost" onClick={() => { setActiveStep(0); setPlaying(false); }}>
               ↺ Reset
-            </button>
-          </div>
+            </VizButton>
+          </VizControls>
 
           {/* PKCE callout */}
           <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-3 text-xs text-zinc-500 leading-relaxed">
@@ -1442,7 +1432,7 @@ export function AuthViz() {
           <div className="flex flex-col gap-3 pt-2 border-t border-zinc-800">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-semibold text-white">Refresh token flow</h3>
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 border border-zinc-700 font-mono">
+              <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 border border-zinc-700 font-mono">
                 when access token expires
               </span>
             </div>

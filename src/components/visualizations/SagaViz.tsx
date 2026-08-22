@@ -1,465 +1,364 @@
 "use client";
 import { useState, useRef, useEffect, useCallback } from "react";
+import {
+  VizFrame, VizStage, VizHint, VizControls, VizButton, VizSpacer,
+  VizStatus, VizStats, VizLegend, VizLog,
+  VizSvg, VizText, VizEdge, VizPacket,
+  useOnScreen, useReducedMotion, useEventLog,
+  HUE, TYPE, STROKE, type HueName,
+} from "./_shared";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type StepStatus = "idle" | "running" | "success" | "failed" | "compensating" | "compensated";
-type RunMode = "happy" | "fail-payment" | "fail-shipping";
+type StepState = "idle" | "running" | "done" | "failed" | "compensating" | "compensated";
+type Mode = "happy" | "fail-payment" | "fail-shipping";
 
 interface Step {
   id: string;
   service: string;
   action: string;
   event: string;
-  compensation: string;
-  compEvent: string;
-  db: string;
-  color: string;
-  borderColor: string;
+  undo: string;
+  undoEvent: string;
+  store: string;
 }
-
-interface LogEntry {
-  id: number;
-  kind: "forward" | "comp" | "info" | "error";
-  text: string;
-}
-
-// ─── Data ─────────────────────────────────────────────────────────────────────
 
 const STEPS: Step[] = [
-  {
-    id: "order",
-    service: "Order Service",
-    action: "Create Order",
-    event: "OrderCreated",
-    compensation: "Cancel Order",
-    compEvent: "OrderCancelled",
-    db: "orders DB",
-    color: "#4f46e5",
-    borderColor: "#818cf8",
-  },
-  {
-    id: "inventory",
-    service: "Inventory Service",
-    action: "Reserve Stock",
-    event: "StockReserved",
-    compensation: "Release Stock",
-    compEvent: "StockReleased",
-    db: "inventory DB",
-    color: "#0891b2",
-    borderColor: "#22d3ee",
-  },
-  {
-    id: "payment",
-    service: "Payment Service",
-    action: "Charge Payment",
-    event: "PaymentCharged",
-    compensation: "Refund Payment",
-    compEvent: "PaymentRefunded",
-    db: "payments DB",
-    color: "#7c3aed",
-    borderColor: "#a78bfa",
-  },
-  {
-    id: "shipping",
-    service: "Shipping Service",
-    action: "Create Shipment",
-    event: "ShipmentCreated",
-    compensation: "Cancel Shipment",
-    compEvent: "ShipmentCancelled",
-    db: "shipments DB",
-    color: "#059669",
-    borderColor: "#34d399",
-  },
+  { id: "order",     service: "Order",     action: "Create order",    event: "OrderCreated",    undo: "Cancel order",    undoEvent: "OrderCancelled",    store: "orders" },
+  { id: "inventory", service: "Inventory", action: "Reserve stock",   event: "StockReserved",   undo: "Release stock",   undoEvent: "StockReleased",     store: "inventory" },
+  { id: "payment",   service: "Payment",   action: "Charge card",     event: "PaymentCharged",  undo: "Refund card",     undoEvent: "PaymentRefunded",   store: "payments" },
+  { id: "shipping",  service: "Shipping",  action: "Book shipment",   event: "ShipmentCreated", undo: "Cancel shipment", undoEvent: "ShipmentCancelled", store: "shipments" },
 ];
 
-const FAIL_AT: Record<RunMode, string | null> = {
+const FAIL_AT: Record<Mode, string | null> = {
   happy: null,
   "fail-payment": "payment",
   "fail-shipping": "shipping",
 };
 
-const STEP_MS = 900;
+const MODES: Array<{ v: Mode; label: string; desc: string }> = [
+  { v: "happy",          label: "Happy path",      desc: "all four steps commit" },
+  { v: "fail-payment",   label: "Payment declines", desc: "roll back 2 steps" },
+  { v: "fail-shipping",  label: "Shipping fails",   desc: "roll back 3 steps" },
+];
 
-// ─── Component ────────────────────────────────────────────────────────────────
+const STEP_MS = 850;
+
+const STATE_HUE: Record<StepState, HueName> = {
+  idle: "neutral",
+  running: "warning",
+  done: "success",
+  failed: "danger",
+  compensating: "warning",
+  compensated: "info",
+};
+
+const STATE_GLYPH: Record<StepState, string> = {
+  idle: "", running: "…", done: "✓", failed: "✗", compensating: "↩", compensated: "⤺",
+};
+
+// ─── Layout ───────────────────────────────────────────────────────────────────
+const W = 760;
+const H = 230;
+const BOX_W = 158;
+const BOX_H = 74;
+const GAP = 42;
+const ROW_Y = 74;
+const startX = (W - (STEPS.length * BOX_W + (STEPS.length - 1) * GAP)) / 2;
+const xOf = (i: number) => startX + i * (BOX_W + GAP);
+
+const emptyStates = () =>
+  Object.fromEntries(STEPS.map((s) => [s.id, "idle" as StepState])) as Record<string, StepState>;
 
 export function SagaViz() {
-  const [statuses, setStatuses] = useState<Record<string, StepStatus>>(
-    Object.fromEntries(STEPS.map((s) => [s.id, "idle"]))
-  );
-  const [activeArrow, setActiveArrow] = useState<{
-    from: number; to: number; kind: "forward" | "comp"; label: string;
-  } | null>(null);
-  const [log, setLog] = useState<LogEntry[]>([]);
+  const [states, setStates] = useState<Record<string, StepState>>(emptyStates);
+  const [mode, setMode] = useState<Mode>("happy");
   const [running, setRunning] = useState(false);
-  const [mode, setMode] = useState<RunMode>("happy");
-  const logId = useRef(0);
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const [outcome, setOutcome] = useState<"none" | "committed" | "rolled-back">("none");
+  /** The hop currently animating: [fromIndex, toIndex, direction] */
+  const [hop, setHop] = useState<{ from: number; to: number; back: boolean; label: string } | null>(null);
 
-  function clearTimers() {
+  const { entries, push, clear: clearLog } = useEventLog(8);
+  const { ref: hostRef } = useOnScreen<HTMLDivElement>();
+  const reduced = useReducedMotion();
+
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const clearTimers = useCallback(() => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
-  }
+  }, []);
+  useEffect(() => clearTimers, [clearTimers]);
 
-  function t(fn: () => void, ms: number) {
-    const id = setTimeout(fn, ms);
-    timers.current.push(id);
-    return id;
-  }
+  const run = useCallback((m: Mode) => {
+    clearTimers();
+    setStates(emptyStates());
+    setHop(null);
+    setOutcome("none");
+    clearLog();
+    setRunning(true);
+    setMode(m);
 
-  function setStatus(id: string, status: StepStatus) {
-    setStatuses((prev) => ({ ...prev, [id]: status }));
-  }
+    const failAt = FAIL_AT[m];
+    const schedule = (ms: number, fn: () => void) => {
+      if (reduced) { fn(); return; }
+      timers.current.push(setTimeout(fn, ms));
+    };
 
-  function addLog(kind: LogEntry["kind"], text: string) {
-    setLog((prev) => [{ id: logId.current++, kind, text }, ...prev].slice(0, 14));
-  }
+    let clock = 0;
+    let failIdx = -1;
+
+    // Forward pass — each step commits locally and emits its event.
+    for (let i = 0; i < STEPS.length; i++) {
+      const step = STEPS[i];
+      const fails = step.id === failAt;
+      const start = clock;
+
+      schedule(start, () => {
+        setHop({ from: i - 1, to: i, back: false, label: i === 0 ? "PlaceOrder" : STEPS[i - 1].event });
+        setStates((p) => ({ ...p, [step.id]: "running" }));
+        push(`→ ${step.service}: ${step.action}`, "warning");
+      });
+
+      schedule(start + STEP_MS * 0.65, () => {
+        if (fails) {
+          setStates((p) => ({ ...p, [step.id]: "failed" }));
+          setHop(null);
+          push(`✗ ${step.service} failed — no global rollback available`, "danger");
+        } else {
+          setStates((p) => ({ ...p, [step.id]: "done" }));
+          push(`✓ ${step.service} committed · ${step.event}`, "success");
+        }
+      });
+
+      clock += STEP_MS;
+      if (fails) { failIdx = i; break; }
+    }
+
+    if (failIdx < 0) {
+      schedule(clock, () => {
+        setHop(null);
+        setOutcome("committed");
+        setRunning(false);
+        push("✓ Saga complete — every step committed", "success");
+      });
+      return;
+    }
+
+    // Compensation pass — undo the committed steps in reverse order.
+    for (let i = failIdx - 1; i >= 0; i--) {
+      const step = STEPS[i];
+      const start = clock;
+
+      schedule(start, () => {
+        setHop({ from: i + 1, to: i, back: true, label: STEPS[i + 1].undoEvent });
+        setStates((p) => ({ ...p, [step.id]: "compensating" }));
+        push(`↩ ${step.service}: ${step.undo}`, "warning");
+      });
+
+      schedule(start + STEP_MS * 0.65, () => {
+        setStates((p) => ({ ...p, [step.id]: "compensated" }));
+        push(`⤺ ${step.service} compensated · ${step.undoEvent}`, "info");
+      });
+
+      clock += STEP_MS;
+    }
+
+    schedule(clock, () => {
+      setHop(null);
+      setOutcome("rolled-back");
+      setRunning(false);
+      push(
+        failIdx === 0
+          ? "Failed at the first step — nothing to compensate"
+          : `Saga rolled back — ${failIdx} compensation${failIdx === 1 ? "" : "s"} applied`,
+        "info"
+      );
+    });
+  }, [clearTimers, clearLog, push, reduced]);
 
   function reset() {
     clearTimers();
-    setStatuses(Object.fromEntries(STEPS.map((s) => [s.id, "idle"])));
-    setActiveArrow(null);
-    setLog([]);
+    setStates(emptyStates());
+    setHop(null);
+    setOutcome("none");
     setRunning(false);
+    clearLog();
   }
 
-  const run = useCallback((selectedMode: RunMode) => {
-    clearTimers();
-    setStatuses(Object.fromEntries(STEPS.map((s) => [s.id, "idle"])));
-    setActiveArrow(null);
-    setLog([]);
-    setRunning(true);
+  const committed = STEPS.filter((s) => states[s.id] === "done").length;
+  const compensated = STEPS.filter((s) => states[s.id] === "compensated").length;
+  const failedStep = STEPS.find((s) => states[s.id] === "failed");
 
-    const failAt = FAIL_AT[selectedMode];
-    let cursor = 0; // ms
+  const statusHue: HueName =
+    outcome === "committed" ? "success"
+    : outcome === "rolled-back" ? "info"
+    : failedStep ? "danger"
+    : running ? "warning" : "neutral";
 
-    // ── Forward pass ──────────────────────────────────────────────────────────
-    let failIndex = -1;
-
-    for (let i = 0; i < STEPS.length; i++) {
-      const step = STEPS[i];
-      const isFail = step.id === failAt;
-      const stepStart = cursor;
-
-      // Show arrow into this step
-      t(() => {
-        setActiveArrow({
-          from: i - 1,
-          to: i,
-          kind: "forward",
-          label: i === 0 ? "PlaceOrder" : STEPS[i - 1].event,
-        });
-        setStatus(step.id, "running");
-        addLog("forward", `→ ${step.service}: ${step.action}`);
-      }, stepStart);
-
-      // Outcome
-      t(() => {
-        if (isFail) {
-          setStatus(step.id, "failed");
-          setActiveArrow(null);
-          addLog("error", `✗ ${step.service} failed — starting compensation`);
-        } else {
-          setStatus(step.id, "success");
-          addLog("forward", `✓ ${step.service} emits ${step.event}`);
-        }
-      }, stepStart + STEP_MS * 0.7);
-
-      cursor += STEP_MS;
-
-      if (isFail) {
-        failIndex = i;
-        break;
-      }
-    }
-
-    // ── Compensation pass (reverse) ───────────────────────────────────────────
-    if (failIndex > 0) {
-      for (let i = failIndex - 1; i >= 0; i--) {
-        const step = STEPS[i];
-        const compStart = cursor;
-
-        t(() => {
-          setActiveArrow({
-            from: i + 1,
-            to: i,
-            kind: "comp",
-            label: STEPS[i + 1].compEvent,
-          });
-          setStatus(step.id, "compensating");
-          addLog("comp", `↩ ${step.service}: ${step.compensation}`);
-        }, compStart);
-
-        t(() => {
-          setStatus(step.id, "compensated");
-          addLog("comp", `✓ ${step.service} emits ${step.compEvent}`);
-        }, compStart + STEP_MS * 0.7);
-
-        cursor += STEP_MS;
-      }
-
-      t(() => {
-        setActiveArrow(null);
-        addLog("info", "Saga rolled back — all compensations complete");
-        setRunning(false);
-      }, cursor);
-    } else if (failIndex === -1) {
-      // happy path finish
-      t(() => {
-        setActiveArrow(null);
-        addLog("info", "✓ Saga completed successfully");
-        setRunning(false);
-      }, cursor);
-    } else {
-      // failed at first step — no compensation needed
-      t(() => {
-        setActiveArrow(null);
-        addLog("info", "Saga failed at first step — no compensation needed");
-        setRunning(false);
-      }, cursor + 400);
-    }
-  }, []);
-
-  useEffect(() => () => clearTimers(), []);
-
-  // ─── Status colours ───────────────────────────────────────────────────────
-
-  function stepBg(id: string) {
-    const s = statuses[id];
-    if (s === "success")      return "bg-emerald-950/60 border-emerald-500";
-    if (s === "failed")       return "bg-red-950/60 border-red-500";
-    if (s === "running")      return "bg-indigo-950/60 border-indigo-400";
-    if (s === "compensating") return "bg-amber-950/60 border-amber-500";
-    if (s === "compensated")  return "bg-zinc-900/60 border-zinc-600";
-    return "bg-zinc-900/40 border-zinc-800";
-  }
-
-  function stepLabel(id: string) {
-    const s = statuses[id];
-    if (s === "success")      return <span className="text-[10px] text-emerald-400">✓ done</span>;
-    if (s === "failed")       return <span className="text-[10px] text-red-400">✗ failed</span>;
-    if (s === "running")      return <span className="text-[10px] text-indigo-400 animate-pulse">⋯ running</span>;
-    if (s === "compensating") return <span className="text-[10px] text-amber-400 animate-pulse">↩ rolling back</span>;
-    if (s === "compensated")  return <span className="text-[10px] text-zinc-500">↩ compensated</span>;
-    return <span className="text-[10px] text-zinc-700">idle</span>;
-  }
-
-  // ─── SVG layout ───────────────────────────────────────────────────────────
-  const W = 600;
-  const boxW = 110;
-  const boxH = 70;
-  const gapX = (W - STEPS.length * boxW) / (STEPS.length + 1);
-  const stepX = (i: number) => gapX + i * (boxW + gapX) + boxW / 2; // centre x
-  const boxY = 20;
-  const arrowY = boxY + boxH / 2;
+  const statusLabel =
+    outcome === "committed" ? "COMMITTED"
+    : outcome === "rolled-back" ? "ROLLED BACK"
+    : failedStep ? "COMPENSATING"
+    : running ? "IN PROGRESS" : "READY";
 
   return (
-    <div className="flex flex-col gap-5">
+    <VizFrame>
+      <VizStatus hue={statusHue} label={statusLabel} pulse={running}>
+        {outcome === "committed"
+          ? "Every local transaction committed. There was never a distributed transaction — just four independent ones."
+          : outcome === "rolled-back"
+            ? "Each committed step was undone by its own compensating transaction, in reverse order. Note that money was really charged and really refunded — compensation is not a rollback."
+            : failedStep
+              ? `${failedStep.service} failed. Earlier steps already committed, so they must be explicitly undone.`
+              : running
+                ? "Each service commits locally and publishes an event that triggers the next."
+                : "Pick a scenario. A saga trades atomicity for availability across service boundaries."}
+      </VizStatus>
 
-      {/* Mode selector */}
-      <div className="flex flex-wrap gap-2">
-        {([
-          { value: "happy",        label: "Happy path",         color: "text-emerald-400" },
-          { value: "fail-payment", label: "Fail at Payment",    color: "text-red-400" },
-          { value: "fail-shipping",label: "Fail at Shipping",   color: "text-amber-400" },
-        ] as const).map(({ value, label, color }) => (
-          <button
-            key={value}
-            onClick={() => setMode(value)}
-            className={`px-3 py-1.5 rounded-lg text-sm transition-colors border ${
-              mode === value
-                ? "bg-zinc-700 border-zinc-500 text-white"
-                : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-            }`}
-          >
-            <span className={`${mode === value ? color : ""}`}>{label}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Diagram */}
-      <div className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-        <svg width={W} height={160} viewBox={`0 0 ${W} 160`} className="overflow-visible">
-          <defs>
-            <marker id="saga-fwd" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-              <polygon points="0 0, 7 2.5, 0 5" fill="#6366f1" />
-            </marker>
-            <marker id="saga-comp" markerWidth="7" markerHeight="5" refX="0" refY="2.5" orient="auto-start-reverse">
-              <polygon points="0 0, 7 2.5, 0 5" fill="#f59e0b" />
-            </marker>
-          </defs>
-
-          {/* Static connector lines */}
-          {STEPS.map((_, i) => {
-            if (i === STEPS.length - 1) return null;
-            const x1 = stepX(i) + boxW / 2;
-            const x2 = stepX(i + 1) - boxW / 2;
-            return (
-              <line key={i} x1={x1} y1={arrowY} x2={x2} y2={arrowY}
-                stroke="#27272a" strokeWidth="1" strokeDasharray="4,3" />
-            );
-          })}
-
-          {/* Active animated arrow */}
-          {activeArrow && (() => {
-            const { from, to, kind, label } = activeArrow;
-            const isComp = kind === "comp";
-            const x1 = from < 0 ? 0 : stepX(from) + (isComp ? -boxW / 2 : boxW / 2);
-            const x2 = stepX(to) + (isComp ? boxW / 2 : -boxW / 2);
-            const arrowColor = isComp ? "#f59e0b" : "#818cf8";
-            return (
-              <g>
-                <line
-                  x1={x1} y1={arrowY + (isComp ? 12 : -12)}
-                  x2={x2} y2={arrowY + (isComp ? 12 : -12)}
-                  stroke={arrowColor} strokeWidth="2"
-                  markerEnd={isComp ? undefined : "url(#saga-fwd)"}
-                  markerStart={isComp ? "url(#saga-comp)" : undefined}
-                  style={{ filter: `drop-shadow(0 0 4px ${arrowColor})` }}
-                />
-                <text
-                  x={(x1 + x2) / 2} y={arrowY + (isComp ? 26 : -16)}
-                  textAnchor="middle" fill={arrowColor}
-                  fontSize="8" fontFamily="monospace"
-                >
-                  {label}
-                </text>
-              </g>
-            );
-          })()}
-
-          {/* Step boxes */}
-          {STEPS.map((step, i) => {
-            const cx = stepX(i);
-            const bx = cx - boxW / 2;
-            const status = statuses[step.id];
-            const isRunning = status === "running" || status === "compensating";
-
-            const stroke =
-              status === "success"      ? "#059669" :
-              status === "failed"       ? "#ef4444" :
-              status === "running"      ? "#818cf8" :
-              status === "compensating" ? "#f59e0b" :
-              status === "compensated"  ? "#52525b" :
-              "#3f3f46";
-
-            const fill =
-              status === "success"      ? "#052e16" :
-              status === "failed"       ? "#450a0a" :
-              status === "running"      ? "#1e1b4b" :
-              status === "compensating" ? "#1c1407" :
-              status === "compensated"  ? "#18181b" :
-              "#09090b";
-
-            return (
-              <g key={step.id}>
-                <rect x={bx} y={boxY} width={boxW} height={boxH} rx={10}
-                  fill={fill} stroke={stroke}
-                  strokeWidth={isRunning ? 2 : 1}
-                  style={isRunning ? { filter: `drop-shadow(0 0 6px ${stroke})` } : {}}
-                />
-                <text x={cx} y={boxY + 18} textAnchor="middle"
-                  fill="#e4e4e7" fontSize="9.5" fontWeight="700" fontFamily="sans-serif">
-                  {step.service}
-                </text>
-                <text x={cx} y={boxY + 32} textAnchor="middle"
-                  fill={stroke} fontSize="8.5" fontFamily="sans-serif">
-                  {status === "compensating" ? step.compensation : step.action}
-                </text>
-                {/* DB badge */}
-                <rect x={bx + 10} y={boxY + 42} width={boxW - 20} height={18} rx={4}
-                  fill="#18181b" stroke="#3f3f46" strokeWidth="1" />
-                <text x={cx} y={boxY + 55} textAnchor="middle"
-                  fill="#52525b" fontSize="7.5" fontFamily="monospace">
-                  {step.db}
-                </text>
-              </g>
-            );
-          })}
-
-          {/* Legend */}
-          <g transform="translate(0, 135)">
-            <circle cx={8} cy={8} r={4} fill="#818cf8" />
-            <text x={16} y={12} fill="#71717a" fontSize="8" fontFamily="sans-serif">forward transaction</text>
-            <circle cx={130} cy={8} r={4} fill="#f59e0b" />
-            <text x={138} y={12} fill="#71717a" fontSize="8" fontFamily="sans-serif">compensating transaction</text>
-            <circle cx={290} cy={8} r={4} fill="#ef4444" />
-            <text x={298} y={12} fill="#71717a" fontSize="8" fontFamily="sans-serif">failure point</text>
-          </g>
-        </svg>
-      </div>
-
-      {/* Step detail cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        {STEPS.map((step) => {
-          const status = statuses[step.id];
+      {/* Scenario */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        {MODES.map((m) => {
+          const on = mode === m.v;
           return (
-            <div
-              key={step.id}
-              className={`rounded-xl border p-3 flex flex-col gap-1.5 transition-all ${stepBg(step.id)}`}
+            <button
+              key={m.v}
+              type="button"
+              onClick={() => run(m.v)}
+              disabled={running}
+              aria-pressed={on}
+              className={`rounded-xl border px-3 py-2 text-left transition-all
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/70
+                disabled:opacity-40 disabled:pointer-events-none
+                ${on ? "border-violet-500/60 bg-violet-500/10" : "border-zinc-800 bg-zinc-900/40 hover:border-zinc-700"}`}
             >
-              <div className="flex items-center justify-between gap-1">
-                <span className="text-xs font-semibold text-zinc-200 leading-snug">{step.service}</span>
-                {stepLabel(step.id)}
-              </div>
-              <span className="text-[10px] text-zinc-500 font-mono leading-snug">
-                {status === "compensating" || status === "compensated"
-                  ? `↩ ${step.compensation}`
-                  : step.action}
+              <span className={`block text-[13px] font-medium ${on ? "text-violet-200" : "text-zinc-300"}`}>
+                {m.label}
               </span>
-              <span className="text-[10px] text-zinc-700 font-mono">{step.db}</span>
-            </div>
+              <span className="block text-[11px] text-zinc-500 mt-0.5">{m.desc}</span>
+            </button>
           );
         })}
       </div>
 
-      {/* Controls */}
-      <div className="flex flex-wrap gap-2 items-center">
-        <button
-          onClick={() => run(mode)}
-          disabled={running}
-          className="px-4 py-1.5 rounded-lg text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          {running ? "⏳ Running…" : "▶ Run Saga"}
-        </button>
-        <button
-          onClick={reset}
-          className="px-3 py-1.5 rounded-lg text-sm text-zinc-400 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 hover:text-zinc-200 transition-colors"
-        >
-          ↺ Reset
-        </button>
-        <span className="text-xs text-zinc-600">
-          {mode === "happy"
-            ? "All steps succeed — saga completes."
-            : mode === "fail-payment"
-            ? "Payment fails — inventory reservation is compensated."
-            : "Shipping fails — payment and inventory are both compensated."}
-        </span>
+      <div ref={hostRef}>
+        <VizStage>
+          <VizSvg w={W} h={H} label="Four saga steps, each committing locally, with compensating transactions running in reverse on failure">
+            {/* Forward chain above, compensation chain below */}
+            {STEPS.slice(0, -1).map((_, i) => (
+              <VizEdge
+                key={`f-${i}`}
+                from={[xOf(i) + BOX_W, ROW_Y + BOX_H / 2 - 12]}
+                to={[xOf(i + 1), ROW_Y + BOX_H / 2 - 12]}
+                hue="success"
+                arrow
+                active={hop?.to === i + 1 && !hop.back}
+                dimmed={states[STEPS[i + 1].id] === "idle"}
+              />
+            ))}
+            {STEPS.slice(0, -1).map((_, i) => {
+              const shown = compensated > 0 || Boolean(failedStep);
+              return (
+                <VizEdge
+                  key={`c-${i}`}
+                  from={[xOf(i + 1), ROW_Y + BOX_H / 2 + 14]}
+                  to={[xOf(i) + BOX_W, ROW_Y + BOX_H / 2 + 14]}
+                  hue="info"
+                  dashed
+                  arrow
+                  active={hop?.to === i && Boolean(hop?.back)}
+                  dimmed={!shown}
+                />
+              );
+            })}
+
+            {/* Steps */}
+            {STEPS.map((step, i) => {
+              const st = states[step.id];
+              const hue = STATE_HUE[st];
+              const c = HUE[hue];
+              const x = xOf(i);
+              const lit = st !== "idle";
+              return (
+                <g key={step.id} opacity={lit ? 1 : 0.55} style={{ transition: "opacity 200ms" }}>
+                  <rect
+                    x={x} y={ROW_Y} width={BOX_W} height={BOX_H} rx={10}
+                    fill={lit ? "url(#viz-node-active)" : "url(#viz-node)"}
+                    stroke={c.line}
+                    strokeWidth={st === "running" || st === "compensating" ? STROKE.thick : STROKE.thin}
+                    strokeOpacity={lit ? 1 : 0.5}
+                    style={st === "running" || st === "failed" ? { filter: `drop-shadow(0 0 8px ${c.glow}55)` } : undefined}
+                  />
+                  <VizText x={x + 12} y={ROW_Y + 18} size={TYPE.body} weight={600} anchor="start" fill={HUE.neutral.strong}>
+                    {step.service}
+                  </VizText>
+                  <VizText x={x + BOX_W - 12} y={ROW_Y + 18} size={TYPE.body} weight={700} anchor="end" hue={hue}>
+                    {STATE_GLYPH[st]}
+                  </VizText>
+                  <VizText x={x + 12} y={ROW_Y + 37} size={TYPE.micro} anchor="start" fill="#8b8b96">
+                    {st === "compensating" || st === "compensated" ? step.undo : step.action}
+                  </VizText>
+                  <VizText x={x + 12} y={ROW_Y + 56} size={TYPE.micro} anchor="start" mono hue={hue}>
+                    {st === "idle" ? step.store : st === "compensated" ? step.undoEvent : st === "done" ? step.event : st}
+                  </VizText>
+                  <VizText x={x + BOX_W / 2} y={ROW_Y - 12} size={TYPE.micro} mono fill="#3f3f46">
+                    {`step ${i + 1}`}
+                  </VizText>
+                </g>
+              );
+            })}
+
+            {/* The packet on the active hop */}
+            {hop && hop.from >= 0 && (
+              <VizPacket
+                x={(xOf(hop.from) + xOf(hop.to) + BOX_W) / 2}
+                y={ROW_Y + BOX_H / 2 + (hop.back ? 14 : -12)}
+                hue={hop.back ? "info" : "success"}
+                r={5}
+                label={hop.label}
+              />
+            )}
+
+            <VizText x={12} y={ROW_Y + BOX_H / 2 - 12} size={TYPE.micro} anchor="start" mono fill="#0f766e">
+              forward →
+            </VizText>
+            <VizText x={12} y={ROW_Y + BOX_H / 2 + 14} size={TYPE.micro} anchor="start" mono fill="#1e40af">
+              ← undo
+            </VizText>
+            <VizText x={W / 2} y={H - 12} size={TYPE.micro} mono fill="#3f3f46">
+              no distributed transaction · no two-phase commit · no shared lock
+            </VizText>
+          </VizSvg>
+        </VizStage>
       </div>
 
-      {/* Event log */}
-      {log.length > 0 && (
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 flex flex-col gap-1 font-mono text-xs">
-          {log.map((entry) => {
-            const color =
-              entry.kind === "forward" ? "text-indigo-400" :
-              entry.kind === "comp"    ? "text-amber-400" :
-              entry.kind === "error"   ? "text-red-400" :
-              "text-emerald-400";
-            const prefix =
-              entry.kind === "forward" ? "[TX]   " :
-              entry.kind === "comp"    ? "[COMP] " :
-              entry.kind === "error"   ? "[FAIL] " :
-              "[SAGA] ";
-            return (
-              <div key={entry.id} className={color}>
-                <span className="opacity-40">{prefix}</span>{entry.text}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <VizControls>
+        <VizButton variant="primary" onClick={() => run(mode)} disabled={running}>
+          ▶ Run {MODES.find((m) => m.v === mode)?.label.toLowerCase()}
+        </VizButton>
+        <VizSpacer />
+        <VizButton variant="ghost" onClick={reset}>↺ Reset</VizButton>
+      </VizControls>
 
-    </div>
+      <VizStats
+        items={[
+          { label: "still committed", value: committed, hue: "success", meter: [committed, STEPS.length] },
+          { label: "compensations run", value: compensated, hue: "info" },
+          { label: "outcome", value: outcome === "none" ? "—" : outcome === "committed" ? "committed" : "rolled back", hue: outcome === "committed" ? "success" : outcome === "rolled-back" ? "info" : "neutral" },
+        ]}
+      />
+
+      <VizLog entries={entries} rows={5} />
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <VizLegend
+          items={[
+            { hue: "success", label: "committed" },
+            { hue: "danger", label: "failed" },
+            { hue: "info", label: "compensated", dashed: true },
+          ]}
+        />
+        <VizHint>
+          A compensation is a new transaction, not an undo — a refund is not an un-charge.
+        </VizHint>
+      </div>
+    </VizFrame>
   );
 }
